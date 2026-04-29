@@ -1,12 +1,16 @@
 package com.example.schoolmanagement.service;
 
+import com.example.schoolmanagement.dto.examscore.ExamScoreListItemDto;
 import com.example.schoolmanagement.entity.Enrollment;
 import com.example.schoolmanagement.entity.ExamScore;
+import com.example.schoolmanagement.entity.ClassEntity;
 import com.example.schoolmanagement.entity.School;
+import com.example.schoolmanagement.entity.Subject;
 import com.example.schoolmanagement.entity.User;
 import com.example.schoolmanagement.exception.BadRequestException;
 import com.example.schoolmanagement.exception.ForbiddenException;
 import com.example.schoolmanagement.exception.ResourceNotFoundException;
+import com.example.schoolmanagement.util.ClassStatusPolicy;
 import com.example.schoolmanagement.repository.*;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
@@ -32,9 +36,9 @@ public class ExamScoreService {
     @Autowired
     private SchoolRepository schoolRepository;
     @Autowired
-    private ScheduleRepository scheduleRepository;
-    @Autowired
     private EnrollmentRepository enrollmentRepository;
+    @Autowired
+    private ClassSectionRepository classSectionRepository;
 
     private static Integer parseInteger(Object obj) {
         if (obj == null) return null;
@@ -51,31 +55,33 @@ public class ExamScoreService {
         return null;
     }
 
-    private void validateTeacherSubject(Integer currentUserId, String currentUserRole, Integer subjectId, boolean isCreate) {
-        if (currentUserId == null || currentUserRole == null || !"TEACHER".equals(currentUserRole.toUpperCase()) || subjectId == null) {
+    private void validateTeacherSubject(Integer currentUserId, String currentUserRole, Integer classId, Integer subjectId, boolean isCreate) {
+        if (currentUserId == null || currentUserRole == null || !"TEACHER".equals(currentUserRole.toUpperCase())) {
             return;
         }
-        List<com.example.schoolmanagement.entity.Schedule> teacherSchedules = scheduleRepository.findByTeacherId(currentUserId);
-        // Một số trường hợp TKB đã tạo nhưng Schedule.subject bị null (hoặc không set đúng).
-        // Khi đó fallback qua schedule.classSection.subject để vẫn đối chiếu được môn giáo viên phụ trách.
-        boolean isAssigned = teacherSchedules.stream().anyMatch(schedule -> {
-            Integer sid = null;
-            if (schedule.getSubject() != null) {
-                sid = schedule.getSubject().getId();
-            } else if (schedule.getClassSection() != null && schedule.getClassSection().getSubject() != null) {
-                sid = schedule.getClassSection().getSubject().getId();
-            }
-            return sid != null && sid.equals(subjectId);
+        if (classId == null || subjectId == null) {
+            String msg = isCreate
+                    ? "Giáo viên chỉ được thêm điểm khi chọn đầy đủ lớp và môn đã được phân công."
+                    : "Giáo viên chỉ được sửa điểm trong lớp-môn đã được phân công.";
+            throw new ForbiddenException(msg);
+        }
+        List<com.example.schoolmanagement.entity.ClassSection> teacherSections =
+                classSectionRepository.findByTeacherIdFetchAll(currentUserId);
+        boolean isAssigned = teacherSections.stream().anyMatch(cs -> {
+            if (cs == null || cs.getClassRoom() == null || cs.getSubject() == null) return false;
+            String st = cs.getStatus() == null ? "ACTIVE" : cs.getStatus().trim().toUpperCase();
+            if (!"ACTIVE".equals(st)) return false;
+            return classId.equals(cs.getClassRoom().getId()) && subjectId.equals(cs.getSubject().getId());
         });
         if (!isAssigned) {
             String msg = isCreate
-                    ? "Bạn không có quyền thêm điểm cho môn học này. Chỉ có thể thêm điểm cho các môn học bạn phụ trách."
-                    : "Bạn không có quyền sửa điểm cho môn học này. Chỉ có thể sửa điểm cho các môn học bạn phụ trách.";
+                    ? "Bạn không có quyền thêm điểm cho lớp-môn này. Chỉ có thể thao tác với các lớp-môn đã được phân công."
+                    : "Bạn không có quyền sửa điểm cho lớp-môn này. Chỉ có thể thao tác với các lớp-môn đã được phân công.";
             throw new ForbiddenException(msg);
         }
     }
 
-    public List<ExamScore> getExamScores(Integer studentId, Integer subjectId, Integer classId, Integer schoolId) {
+    public List<ExamScoreListItemDto> getExamScores(Integer studentId, Integer subjectId, Integer classId, Integer schoolId) {
         List<ExamScore> scores;
         if (schoolId != null) {
             scores = examScoreRepository.findBySchoolId(schoolId);
@@ -91,7 +97,57 @@ public class ExamScoreService {
         if (studentId != null && scores != null) {
             scores = scores.stream().filter(score -> score.getStudent().getId().equals(studentId)).toList();
         }
-        return scores;
+        return scores.stream().map(this::toListItemDto).toList();
+    }
+
+    private ExamScoreListItemDto toListItemDto(ExamScore e) {
+        ExamScoreListItemDto dto = new ExamScoreListItemDto();
+        dto.setId(e.getId());
+        dto.setScore(e.getScore());
+        dto.setScoreType(e.getScoreType());
+        dto.setAttempt(e.getAttempt());
+        dto.setNote(e.getNote());
+        dto.setStatus(e.getStatus());
+
+        User st = e.getStudent();
+        if (st != null) {
+            dto.setStudentId(st.getId());
+            ExamScoreListItemDto.StudentRef s = new ExamScoreListItemDto.StudentRef();
+            s.setId(st.getId());
+            s.setFullName(st.getFullName());
+            s.setEmail(st.getEmail());
+            s.setSchool(toSchoolRef(st.getSchool()));
+            dto.setStudent(s);
+        }
+
+        Subject sub = e.getSubject();
+        if (sub != null) {
+            dto.setSubjectId(sub.getId());
+            ExamScoreListItemDto.SubjectRef sr = new ExamScoreListItemDto.SubjectRef();
+            sr.setId(sub.getId());
+            sr.setName(sub.getName());
+            dto.setSubject(sr);
+        }
+
+        ClassEntity ce = e.getClassEntity();
+        if (ce != null) {
+            dto.setClassId(ce.getId());
+            ExamScoreListItemDto.ClassRef cr = new ExamScoreListItemDto.ClassRef();
+            cr.setId(ce.getId());
+            cr.setName(ce.getName());
+            dto.setClassEntity(cr);
+        }
+
+        dto.setSchool(toSchoolRef(e.getSchool()));
+        return dto;
+    }
+
+    private static ExamScoreListItemDto.SchoolRef toSchoolRef(School school) {
+        if (school == null) return null;
+        ExamScoreListItemDto.SchoolRef s = new ExamScoreListItemDto.SchoolRef();
+        s.setId(school.getId());
+        s.setName(school.getName());
+        return s;
     }
 
     public ExamScore getExamScore(Integer id) {
@@ -104,7 +160,8 @@ public class ExamScoreService {
         if (subjectId == null && scoreData.get("subjectId") != null) {
             throw new BadRequestException("Invalid subject ID format");
         }
-        validateTeacherSubject(currentUserId, currentUserRole, subjectId, true);
+        Integer classId = parseInteger(scoreData.get("classId"));
+        validateTeacherSubject(currentUserId, currentUserRole, classId, subjectId, true);
 
         ExamScore examScore = new ExamScore();
         Integer studentId = parseInteger(scoreData.get("studentId"));
@@ -121,10 +178,11 @@ public class ExamScoreService {
         examScore.setSubject(subjectRepository.findById(subjectId)
                 .orElseThrow(() -> new BadRequestException("Invalid subject ID")));
 
-        Integer classId = parseInteger(scoreData.get("classId"));
         if (classId != null) {
-            examScore.setClassEntity(classRepository.findById(classId)
-                    .orElseThrow(() -> new BadRequestException("Invalid class ID")));
+            ClassEntity classEntity = classRepository.findById(classId)
+                    .orElseThrow(() -> new BadRequestException("Invalid class ID"));
+            ClassStatusPolicy.assertTeachActionAllowed(classEntity, "nhập điểm");
+            examScore.setClassEntity(classEntity);
         } else if (scoreData.get("classId") != null) {
             throw new BadRequestException("Invalid class ID format");
         }
@@ -150,11 +208,18 @@ public class ExamScoreService {
 
     public ExamScore updateExamScore(Integer id, Map<String, Object> scoreData, Integer currentUserId, String currentUserRole) {
         ExamScore examScore = getExamScore(id);
+        if (examScore.getClassEntity() != null) {
+            ClassStatusPolicy.assertTeachActionAllowed(examScore.getClassEntity(), "cập nhật điểm");
+        }
         Integer subjectId = examScore.getSubject() != null ? examScore.getSubject().getId() : null;
+        Integer classIdForPermission = examScore.getClassEntity() != null ? examScore.getClassEntity().getId() : null;
         if (scoreData.containsKey("subjectId")) {
             subjectId = parseInteger(scoreData.get("subjectId"));
         }
-        validateTeacherSubject(currentUserId, currentUserRole, subjectId, false);
+        if (scoreData.containsKey("classId")) {
+            classIdForPermission = parseInteger(scoreData.get("classId"));
+        }
+        validateTeacherSubject(currentUserId, currentUserRole, classIdForPermission, subjectId, false);
 
         if (scoreData.containsKey("studentId")) {
             Integer studentId = parseInteger(scoreData.get("studentId"));
@@ -178,8 +243,10 @@ public class ExamScoreService {
         if (scoreData.containsKey("classId")) {
             Integer classId = parseInteger(scoreData.get("classId"));
             if (classId != null) {
-                examScore.setClassEntity(classRepository.findById(classId)
-                        .orElseThrow(() -> new BadRequestException("Invalid class ID")));
+                ClassEntity classEntity = classRepository.findById(classId)
+                        .orElseThrow(() -> new BadRequestException("Invalid class ID"));
+                ClassStatusPolicy.assertTeachActionAllowed(classEntity, "cập nhật điểm");
+                examScore.setClassEntity(classEntity);
             } else {
                 throw new BadRequestException("Invalid class ID format");
             }

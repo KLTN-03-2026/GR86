@@ -1,8 +1,14 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import api from '../../../../shared/lib/api';
 import './AssignmentListPage.css';
 import { useAuth } from '../../../auth/context/AuthContext';
 import { Pencil, Trash2 } from 'lucide-react';
+import { isTeachingActiveClass } from '../../../../shared/lib/classStatus';
+import {
+  teacherClassIdsFromSections,
+  teacherSubjectIdsByClassFromSections,
+  teacherSubjectIdsFromSections,
+} from '../../../../shared/lib/teacherScope';
 
 const AssignmentListPage = () => {
   const { user } = useAuth();
@@ -30,13 +36,14 @@ const AssignmentListPage = () => {
     description: '',
     instructions: '',
     maxScore: '',
+    dueDate: '',
     status: 'ACTIVE',
     schoolId: '',
     classId: '',
     subjectId: '',
     createdById: ''
   });
-  const [teacherSchedules, setTeacherSchedules] = useState([]); // Schedules của giáo viên
+  const [teacherSections, setTeacherSections] = useState([]); // Class-sections của giáo viên
   const [filteredClasses, setFilteredClasses] = useState([]); // Classes mà giáo viên dạy
   const [filteredSubjects, setFilteredSubjects] = useState([]); // Subjects mà giáo viên dạy
   const [selectedFile, setSelectedFile] = useState(null);
@@ -74,19 +81,19 @@ const AssignmentListPage = () => {
     fetchData();
   }, [user, studentClassId]);
 
-  // Fetch schedules của giáo viên để filter classes và subjects
+  // Fetch class-sections của giáo viên để filter classes và subjects
   useEffect(() => {
     const userRole = user?.role?.name?.toUpperCase();
     if (userRole === 'TEACHER' && user?.id) {
-      fetchTeacherSchedules();
+      fetchTeacherSections();
     }
   }, [user]);
 
-  // Filter classes và subjects khi teacherSchedules thay đổi
+  // Filter classes và subjects khi teacherSections thay đổi
   useEffect(() => {
     const userRole = user?.role?.name?.toUpperCase();
     if (userRole === 'TEACHER') {
-      if (teacherSchedules.length > 0) {
+      if (teacherSections.length > 0) {
         filterTeacherClassesAndSubjects();
       } else {
         // Nếu chưa có schedules, set empty arrays
@@ -98,17 +105,17 @@ const AssignmentListPage = () => {
       setFilteredClasses(classes);
       setFilteredSubjects(subjects);
     }
-  }, [teacherSchedules, classes, subjects, user]);
+  }, [teacherSections, classes, subjects, user]);
 
-  const fetchTeacherSchedules = async () => {
+  const fetchTeacherSections = async () => {
     try {
-      const response = await api.get(`/schedules/teacher/${user.id}`);
-      const schedules = response.data.schedules || [];
-      setTeacherSchedules(schedules);
-      console.log('Teacher schedules:', schedules);
+      const response = await api.get(`/class-sections/teacher/${user.id}`);
+      const sections = response.data.classSections || [];
+      setTeacherSections(sections);
+      console.log('Teacher class-sections:', sections);
     } catch (error) {
-      console.error('Error fetching teacher schedules:', error);
-      setTeacherSchedules([]);
+      console.error('Error fetching teacher class-sections:', error);
+      setTeacherSections([]);
     }
   };
 
@@ -146,28 +153,20 @@ const AssignmentListPage = () => {
 
   const filterTeacherClassesAndSubjects = () => {
     const userRole = user?.role?.name?.toUpperCase();
-    if (userRole !== 'TEACHER' || !teacherSchedules.length) {
+    if (userRole !== 'TEACHER' || !teacherSections.length) {
       setFilteredClasses(classes);
       setFilteredSubjects(subjects);
       return;
     }
 
-    // Lấy danh sách class IDs và subject IDs từ schedules
-    const assignedClassIds = new Set();
-    const assignedSubjectIds = new Set();
+    const assignedClassIds = teacherClassIdsFromSections(teacherSections);
+    const assignedSubjectIds = teacherSubjectIdsFromSections(teacherSections);
 
-    teacherSchedules.forEach(schedule => {
-      const classId = schedule.classEntity?.id || schedule.class_id;
-      const subjectId = schedule.subject?.id || schedule.subject_id;
-      if (classId) assignedClassIds.add(classId);
-      if (subjectId) assignedSubjectIds.add(subjectId);
-    });
-
-    console.log('Teacher assigned class IDs:', Array.from(assignedClassIds));
-    console.log('Teacher assigned subject IDs:', Array.from(assignedSubjectIds));
+    console.log('Teacher assigned class IDs (class-sections):', Array.from(assignedClassIds));
+    console.log('Teacher assigned subject IDs (class-sections):', Array.from(assignedSubjectIds));
 
     // Filter classes
-    const filteredClassesList = classes.filter(cls => {
+    const filteredClassesList = classes.filter(isTeachingActiveClass).filter(cls => {
       const classId = cls.id;
       const isAssigned = assignedClassIds.has(classId);
       const isSameSchool = cls.school?.id === user.school?.id;
@@ -314,6 +313,16 @@ const AssignmentListPage = () => {
   const handleSubmit = async (e) => {
     e.preventDefault();
     try {
+      const parsedMaxScore = parseFloat(formData.maxScore);
+      if (Number.isNaN(parsedMaxScore) || parsedMaxScore < 0 || parsedMaxScore > 10) {
+        alert('Điểm tối đa phải nằm trong khoảng từ 0 đến 10');
+        return;
+      }
+      if (formData.dueDate && new Date(formData.dueDate) < new Date()) {
+        alert('Thời gian nộp bài không được ở quá khứ');
+        return;
+      }
+
       // If file is selected and creating new assignment, use upload endpoint
       if (selectedFile && !editingAssignment) {
         const formDataToSend = new FormData();
@@ -321,7 +330,8 @@ const AssignmentListPage = () => {
         formDataToSend.append('title', formData.title);
         formDataToSend.append('description', formData.description || '');
         formDataToSend.append('instructions', formData.instructions || '');
-        formDataToSend.append('maxScore', formData.maxScore);
+        formDataToSend.append('maxScore', parsedMaxScore.toString());
+        formDataToSend.append('dueDate', formData.dueDate || '');
         formDataToSend.append('status', formData.status);
         if (formData.schoolId) {
           formDataToSend.append('schoolId', formData.schoolId);
@@ -340,7 +350,7 @@ const AssignmentListPage = () => {
         // Regular submission without file or editing
         const submitData = {
           ...formData,
-          maxScore: parseFloat(formData.maxScore),
+          maxScore: parsedMaxScore,
           schoolId: parseInt(formData.schoolId),
           classId: parseInt(formData.classId),
           subjectId: parseInt(formData.subjectId),
@@ -366,6 +376,7 @@ const AssignmentListPage = () => {
         description: '',
         instructions: '',
         maxScore: '',
+        dueDate: '',
         status: 'ACTIVE',
         schoolId: defaultSchoolId,
         classId: '',
@@ -387,6 +398,7 @@ const AssignmentListPage = () => {
       description: assignment.description || '',
       instructions: assignment.instructions || '',
       maxScore: assignment.maxScore?.toString() || '',
+      dueDate: assignment.dueDate ? assignment.dueDate.slice(0, 16) : '',
       status: assignment.status || 'ACTIVE',
       schoolId: assignment.school?.id?.toString() || '',
       classId: assignment.classEntity?.id?.toString() || '',
@@ -604,6 +616,7 @@ const AssignmentListPage = () => {
 
   const isStudent = user?.role?.name?.toUpperCase() === 'STUDENT';
   const isTeacherOrAdmin = user?.role?.name?.toUpperCase() === 'TEACHER' || user?.role?.name?.toUpperCase() === 'ADMIN';
+  const teachingActionClasses = useMemo(() => classes.filter(isTeachingActiveClass), [classes]);
 
   const getSchoolName = (schoolId) => {
     const school = schools.find(s => s.id === schoolId);
@@ -636,6 +649,13 @@ const AssignmentListPage = () => {
   const formatDate = (dateString) => {
     if (!dateString) return 'N/A';
     return new Date(dateString).toLocaleDateString('vi-VN');
+  };
+
+  const getCurrentDateTimeLocal = () => {
+    const now = new Date();
+    now.setSeconds(0, 0);
+    const timezoneOffsetMs = now.getTimezoneOffset() * 60 * 1000;
+    return new Date(now.getTime() - timezoneOffsetMs).toISOString().slice(0, 16);
   };
 
   if (loading) {
@@ -692,7 +712,7 @@ const AssignmentListPage = () => {
               <th className="px-4 py-3 text-left">Tiêu đề</th>
               <th className="px-4 py-3 text-left">Lớp</th>
               <th className="px-4 py-3 text-left">Môn học</th>
-              <th className="px-4 py-3 text-left">Giáo viên</th>
+              <th className="px-4 py-3 text-left">Thời gian nộp bài</th>
               <th className="px-4 py-3 text-left">Điểm tối đa</th>
               <th className="px-4 py-3 text-left">Trạng thái</th>
               <th className="px-4 py-3 text-center">Thao tác</th>
@@ -704,7 +724,7 @@ const AssignmentListPage = () => {
                 <td className="px-4 py-3">{assignment.title}</td>
                 <td className="px-4 py-3">{getClassName(assignment.classEntity?.id)}</td>
                 <td className="px-4 py-3">{getSubjectName(assignment.subject?.id)}</td>
-                <td className="px-4 py-3">{getTeacherName(assignment.createdBy?.id, assignment)}</td>
+                <td className="px-4 py-3">{assignment.dueDate ? new Date(assignment.dueDate).toLocaleString('vi-VN') : 'N/A'}</td>
                 <td className="px-4 py-3">{assignment.maxScore}</td>
                 <td className="px-4 py-3">
                   <span className={`inline-flex min-w-[84px] justify-center rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-wide ${
@@ -1042,8 +1062,18 @@ const AssignmentListPage = () => {
                   value={formData.maxScore}
                   onChange={(e) => setFormData({ ...formData, maxScore: e.target.value })}
                   min="0"
+                  max="10"
                   step="0.1"
                   required
+                />
+              </div>
+              <div className="common-form-group form-group">
+                <label>Thời gian nộp bài</label>
+                <input
+                  type="datetime-local"
+                  value={formData.dueDate || ''}
+                  onChange={(e) => setFormData({ ...formData, dueDate: e.target.value })}
+                  min={getCurrentDateTimeLocal()}
                 />
               </div>
               <div className="common-form-group form-group">
@@ -1073,7 +1103,7 @@ const AssignmentListPage = () => {
                   required
                 >
                   <option value="">Chọn lớp</option>
-                  {(user?.role?.name?.toUpperCase() === 'TEACHER' ? filteredClasses : classes).map(classItem => (
+                  {(user?.role?.name?.toUpperCase() === 'TEACHER' ? filteredClasses : teachingActionClasses).map(classItem => (
                     <option key={classItem.id} value={classItem.id}>
                       {classItem.name}
                     </option>
@@ -1100,16 +1130,13 @@ const AssignmentListPage = () => {
                     const userRole = user?.role?.name?.toUpperCase();
                     let subjectsToShow = userRole === 'TEACHER' ? filteredSubjects : subjects;
 
-                    // Nếu giáo viên đã chọn lớp, filter subjects dựa trên cả lớp và giáo viên
-                    if (userRole === 'TEACHER' && formData.classId && teacherSchedules.length > 0) {
+                    // Nếu giáo viên đã chọn lớp, filter môn theo class_sections của giáo viên trong lớp đó.
+                    if (userRole === 'TEACHER' && formData.classId && teacherSections.length > 0) {
                       const selectedClassId = parseInt(formData.classId);
+                      const subjectIdsByClass = teacherSubjectIdsByClassFromSections(teacherSections);
+                      const subjectIdsInClass = subjectIdsByClass.get(selectedClassId) || new Set();
                       subjectsToShow = filteredSubjects.filter(subject => {
-                        // Kiểm tra xem có schedule nào mà giáo viên dạy môn này cho lớp đã chọn không
-                        return teacherSchedules.some(schedule => {
-                          const scheduleClassId = schedule.classEntity?.id || schedule.class_id;
-                          const scheduleSubjectId = schedule.subject?.id || schedule.subject_id;
-                          return scheduleClassId === selectedClassId && scheduleSubjectId === subject.id;
-                        });
+                        return subjectIdsInClass.has(subject.id);
                       });
                     }
 
@@ -1123,12 +1150,10 @@ const AssignmentListPage = () => {
                 {user?.role?.name?.toUpperCase() === 'TEACHER' && formData.classId && (
                   (() => {
                     const selectedClassId = parseInt(formData.classId);
+                    const subjectIdsByClass = teacherSubjectIdsByClassFromSections(teacherSections);
+                    const subjectIdsInClass = subjectIdsByClass.get(selectedClassId) || new Set();
                     const availableSubjects = filteredSubjects.filter(subject => {
-                      return teacherSchedules.some(schedule => {
-                        const scheduleClassId = schedule.classEntity?.id || schedule.class_id;
-                        const scheduleSubjectId = schedule.subject?.id || schedule.subject_id;
-                        return scheduleClassId === selectedClassId && scheduleSubjectId === subject.id;
-                      });
+                      return subjectIdsInClass.has(subject.id);
                     });
                     if (availableSubjects.length === 0) {
                       return (

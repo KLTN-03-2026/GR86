@@ -14,6 +14,7 @@ import {
     NotebookPen,
     LogOut,
     UserCircle,
+    BarChart3,
 } from "lucide-react";
 
 import logo from "../../../../../assets/logo.jpg";
@@ -74,6 +75,7 @@ const LeftSideBar = ({ user, onLogout }) => {
             case "/subjects":
                 return BookOpen;
             case "/schedules":
+            case "/schedules-template":
                 return CalendarDays;
             case "/exam-scores":
                 return NotebookPen;
@@ -85,6 +87,8 @@ const LeftSideBar = ({ user, onLogout }) => {
                 return Megaphone;
             case "/profile":
                 return UserCircle;
+            case "/platform-reports":
+                return BarChart3;
             default:
                 return School;
         }
@@ -101,12 +105,14 @@ const LeftSideBar = ({ user, onLogout }) => {
 
             { path: "/schools", label: "Quản lý trường học", roles: ["SUPER_ADMIN"] },
             { path: "/users", label: "Quản lý Admin trường", roles: ["SUPER_ADMIN"] },
+            { path: "/platform-reports", label: "Thống kê toàn hệ thống", roles: ["SUPER_ADMIN"] },
 
             { path: "/users", label: "Quản lý người dùng", roles: ["ADMIN"] },
             { path: "/roles", label: "Quản lý phân quyền", roles: ["ADMIN"] },
             { path: "/classes", label: "Quản lý lớp học", roles: ["ADMIN"] },
             { path: "/subjects", label: "Quản lý môn học", roles: ["ADMIN"] },
             { path: "/schedules", label: "Quản lý thời khóa biểu", roles: ["ADMIN"] },
+            { path: "/schedules-template", label: "Thiết lập TKB mẫu", roles: ["ADMIN"] },
             { path: "/exam-scores", label: "Quản lý điểm số", roles: ["ADMIN"] },
             { path: "/attendance", label: "Quản lý điểm danh", roles: ["ADMIN"] },
             { path: "/announcements", label: "Thông báo & Tài liệu", roles: ["ADMIN"] },

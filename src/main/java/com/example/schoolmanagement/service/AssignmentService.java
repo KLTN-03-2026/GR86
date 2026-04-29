@@ -8,6 +8,7 @@ import com.example.schoolmanagement.entity.Subject;
 import com.example.schoolmanagement.entity.User;
 import com.example.schoolmanagement.exception.BadRequestException;
 import com.example.schoolmanagement.exception.ResourceNotFoundException;
+import com.example.schoolmanagement.util.ClassStatusPolicy;
 import com.example.schoolmanagement.repository.AssignmentRepository;
 import com.example.schoolmanagement.repository.AssignmentSubmissionRepository;
 import com.example.schoolmanagement.repository.ClassRepository;
@@ -35,6 +36,8 @@ public class AssignmentService {
     private static final Logger log = LoggerFactory.getLogger(AssignmentService.class);
     private static final String ASSIGNMENT_UPLOAD_DIR = "uploads/assignments/";
     private static final String SUBMISSION_UPLOAD_DIR = "uploads/submissions/";
+    private static final double MIN_ASSIGNMENT_MAX_SCORE = 0.0;
+    private static final double MAX_ASSIGNMENT_MAX_SCORE = 10.0;
 
     @Autowired
     private AssignmentRepository assignmentRepository;
@@ -134,7 +137,13 @@ public class AssignmentService {
 
             Files.copy(file.getInputStream(), filePath);
 
-            Double maxScore = Double.parseDouble(maxScoreStr);
+            Double maxScore;
+            try {
+                maxScore = Double.parseDouble(maxScoreStr);
+            } catch (NumberFormatException e) {
+                throw new BadRequestException("Điểm tối đa không hợp lệ.");
+            }
+            validateAssignmentMaxScore(maxScore);
             Integer createdById = Integer.parseInt(createdByIdStr);
 
             Assignment assignment = new Assignment();
@@ -165,6 +174,7 @@ public class AssignmentService {
                 Integer parsedClassId = Integer.parseInt(classId);
                 ClassEntity classEntity = classRepository.findById(parsedClassId)
                         .orElseThrow(() -> new BadRequestException("Invalid class ID"));
+                ClassStatusPolicy.assertTeachActionAllowed(classEntity, "tạo bài tập");
                 assignment.setClassEntity(classEntity);
             }
 
@@ -191,7 +201,7 @@ public class AssignmentService {
         assignment.setTitle((String) assignmentData.get("title"));
         assignment.setDescription((String) assignmentData.get("description"));
         assignment.setInstructions((String) assignmentData.get("instructions"));
-        assignment.setMaxScore(((Number) assignmentData.get("maxScore")).doubleValue());
+        assignment.setMaxScore(parseAndValidateMaxScore(assignmentData.get("maxScore")));
         assignment.setStatus((String) assignmentData.getOrDefault("status", "ACTIVE"));
         assignment.setCreatedAt(LocalDateTime.now());
         assignment.setUpdatedAt(LocalDateTime.now());
@@ -214,6 +224,7 @@ public class AssignmentService {
         if (classId != null) {
             ClassEntity classEntity = classRepository.findById(classId)
                     .orElseThrow(() -> new BadRequestException("Invalid class ID"));
+            ClassStatusPolicy.assertTeachActionAllowed(classEntity, "tạo bài tập");
             assignment.setClassEntity(classEntity);
         }
 
@@ -348,6 +359,9 @@ public class AssignmentService {
 
     public Assignment updateAssignment(Integer id, Map<String, Object> assignmentData) {
         Assignment existingAssignment = getAssignmentById(id);
+        if (existingAssignment.getClassEntity() != null) {
+            ClassStatusPolicy.assertTeachActionAllowed(existingAssignment.getClassEntity(), "cập nhật bài tập");
+        }
 
         if (assignmentData.get("title") != null) {
             existingAssignment.setTitle((String) assignmentData.get("title"));
@@ -362,7 +376,7 @@ public class AssignmentService {
         }
 
         if (assignmentData.get("maxScore") != null) {
-            existingAssignment.setMaxScore(((Number) assignmentData.get("maxScore")).doubleValue());
+            existingAssignment.setMaxScore(parseAndValidateMaxScore(assignmentData.get("maxScore")));
         }
 
         if (assignmentData.get("status") != null) {
@@ -387,6 +401,7 @@ public class AssignmentService {
             Integer classId = (Integer) assignmentData.get("classId");
             ClassEntity classEntity = classRepository.findById(classId)
                     .orElseThrow(() -> new BadRequestException("Invalid class ID"));
+            ClassStatusPolicy.assertTeachActionAllowed(classEntity, "cập nhật bài tập");
             existingAssignment.setClassEntity(classEntity);
         }
 
@@ -436,5 +451,23 @@ public class AssignmentService {
         AssignmentSubmission savedSubmission = assignmentSubmissionRepository.save(submission);
         log.info("Assignment submission graded: " + savedSubmission.getId() + " with score " + savedSubmission.getScore());
         return savedSubmission;
+    }
+
+    private Double parseAndValidateMaxScore(Object rawMaxScore) {
+        if (!(rawMaxScore instanceof Number numberValue)) {
+            throw new BadRequestException("Điểm tối đa không hợp lệ.");
+        }
+        double parsed = numberValue.doubleValue();
+        validateAssignmentMaxScore(parsed);
+        return parsed;
+    }
+
+    private void validateAssignmentMaxScore(double maxScore) {
+        if (Double.isNaN(maxScore) || Double.isInfinite(maxScore)) {
+            throw new BadRequestException("Điểm tối đa không hợp lệ.");
+        }
+        if (maxScore < MIN_ASSIGNMENT_MAX_SCORE || maxScore > MAX_ASSIGNMENT_MAX_SCORE) {
+            throw new BadRequestException("Điểm tối đa phải nằm trong khoảng 0 đến 10.");
+        }
     }
 }

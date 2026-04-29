@@ -1,7 +1,10 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
+import { toast } from "react-toastify";
 import api from "../../../../shared/lib/api";
 import { useAuth } from "../../../auth/context/AuthContext";
+import ClassFormModal from "../../components/ClassFormModal";
+import { isValidSchoolYearFormat } from "../../../../shared/lib/schoolYearFormat";
 
 const tabs = [
   { id: "overview", label: "Thông tin lớp" },
@@ -18,6 +21,15 @@ const safeText = (v, fallback = "N/A") => {
 const isTeacherRole = (name) => {
   const n = (name || "").toString().toUpperCase();
   return n === "TEACHER" || n.startsWith("TEACHER") || n === "GIÁO VIÊN";
+};
+
+const toStudyStatus = (status, fallback = "Đang học") => {
+  const s = (status || "").toString().trim().toUpperCase();
+  if (!s) return fallback;
+  if (s === "ACTIVE") return "Đang học";
+  if (s === "INACTIVE") return "Ngưng học";
+  if (s === "ARCHIVED") return "Đã lưu trữ";
+  return status;
 };
 
 const ClassDetailPage = () => {
@@ -40,6 +52,17 @@ const ClassDetailPage = () => {
   const [creating, setCreating] = useState(false);
   const [deletingId, setDeletingId] = useState(null);
   const [createError, setCreateError] = useState("");
+  const [showEditModal, setShowEditModal] = useState(false);
+  const [editFormData, setEditFormData] = useState({
+    gradeLevel: "",
+    classNumber: "",
+    schoolYear: "",
+    capacity: "",
+    status: "ACTIVE",
+    schoolId: "",
+    homeroomTeacherId: "",
+    room: "",
+  });
   const [createForm, setCreateForm] = useState({
     subjectId: "",
     teacherId: "",
@@ -50,6 +73,18 @@ const ClassDetailPage = () => {
 
   const userRole = user?.role?.name?.toUpperCase();
   const canManageSections = userRole === "ADMIN" || userRole === "SUPER_ADMIN";
+  const canEditClass = !isTeacherRole(user?.role?.name);
+  const canViewSectionsTab = !isTeacherRole(user?.role?.name);
+  const visibleTabs = useMemo(
+    () => tabs.filter((t) => (t.id === "sections" ? canViewSectionsTab : true)),
+    [canViewSectionsTab]
+  );
+
+  useEffect(() => {
+    if (activeTab === "sections" && !canViewSectionsTab) {
+      setActiveTab("overview");
+    }
+  }, [activeTab, canViewSectionsTab]);
 
   useEffect(() => {
     let cancelled = false;
@@ -176,6 +211,65 @@ const ClassDetailPage = () => {
     setClassSections(sectionsRes.data?.classSections || []);
   };
 
+  const openEditModal = () => {
+    if (!classEntity) return;
+    setEditFormData({
+      gradeLevel: classEntity.gradeLevel ? String(classEntity.gradeLevel) : "",
+      classNumber: classEntity.classNumber ? String(classEntity.classNumber) : "",
+      schoolYear: classEntity?.schoolYear?.name || classEntity?.schoolYear || "",
+      capacity: classEntity.capacity ? String(classEntity.capacity) : "",
+      status: classEntity.status || "ACTIVE",
+      schoolId: classEntity?.school?.id ? String(classEntity.school.id) : "",
+      homeroomTeacherId: classEntity?.homeroomTeacher?.id ? String(classEntity.homeroomTeacher.id) : "",
+      room: classEntity.room || "",
+    });
+    setShowEditModal(true);
+  };
+
+  const handleUpdateClass = async (e) => {
+    e.preventDefault();
+    try {
+      const gradeLevel = parseInt(editFormData.gradeLevel, 10);
+      const classNumber = parseInt(editFormData.classNumber, 10);
+      const capacity = parseInt(editFormData.capacity, 10);
+      if (Number.isNaN(capacity) || capacity < 1 || capacity > 50) {
+        toast.error("Sĩ số tối đa chỉ được nhập từ 1 đến 50.");
+        return;
+      }
+      const schoolYearStr = (editFormData.schoolYear || "").trim();
+      if (!isValidSchoolYearFormat(schoolYearStr)) {
+        toast.error("Niên khóa phải đúng định dạng YYYY-YYYY (ví dụ 2024-2025).");
+        return;
+      }
+      const name = schoolYearStr
+        ? `${gradeLevel}/${classNumber} (${schoolYearStr})`
+        : `Khối ${gradeLevel} - Lớp ${classNumber}`;
+
+      const submitData = {
+        ...editFormData,
+        name,
+        gradeLevel,
+        classNumber,
+        capacity,
+        schoolId: parseInt(editFormData.schoolId, 10),
+        homeroomTeacherId: editFormData.homeroomTeacherId ? parseInt(editFormData.homeroomTeacherId, 10) : null,
+        room: editFormData.room || null,
+      };
+
+      const headers = { "X-User-Role": user?.role?.name || "" };
+      const response = await api.put(`/classes/${classId}`, submitData, { headers });
+      const updatedClass = response?.data?.class || response?.data || null;
+      if (updatedClass) {
+        setClassEntity(updatedClass);
+      }
+      setShowEditModal(false);
+      toast.success("Cập nhật lớp học thành công.");
+    } catch (err) {
+      const msg = err?.response?.data?.message || err?.response?.data?.error || "Cập nhật lớp học thất bại.";
+      toast.error(String(msg));
+    }
+  };
+
   const handleCreateSection = async (e) => {
     e.preventDefault();
     setCreateError("");
@@ -191,6 +285,7 @@ const ClassDetailPage = () => {
       };
       await api.post("/class-sections", payload);
       await refreshSections();
+      toast.success("Đã thêm lớp học phần.");
       setCreateForm((prev) => ({
         ...prev,
         subjectId: "",
@@ -199,7 +294,9 @@ const ClassDetailPage = () => {
       }));
     } catch (err) {
       const msg = err?.response?.data?.error || err?.response?.data?.message;
-      setCreateError(msg ? String(msg) : "Tạo lớp học phần thất bại. Vui lòng thử lại.");
+      const text = msg ? String(msg) : "Tạo lớp học phần thất bại. Vui lòng thử lại.";
+      setCreateError(text);
+      toast.error(text);
       // Trong trường hợp bản ghi đã tồn tại từ trước, vẫn reload danh sách để hiển thị
       try {
         await refreshSections();
@@ -219,11 +316,12 @@ const ClassDetailPage = () => {
     try {
       setDeletingId(sectionId);
       await api.delete(`/class-sections/${sectionId}`);
+      toast.success("Đã xóa lớp học phần.");
       await refreshSections();
     } catch (err) {
       const msg =
         err?.response?.data?.error || err?.response?.data?.message || "Xóa thất bại";
-      alert(String(msg));
+      toast.error(String(msg));
     } finally {
       setDeletingId(null);
     }
@@ -231,144 +329,164 @@ const ClassDetailPage = () => {
 
   if (loading) {
     return (
-      <div className="class-list-page">
-        <div className="loading">Đang tải...</div>
+      <div className="min-h-screen bg-slate-100 px-4 py-6">
+        <div className="mx-auto max-w-6xl">
+          <div className="rounded-2xl border border-slate-200 bg-white/95 px-4 py-6 text-center text-slate-600 shadow-xl shadow-slate-900/5">
+            Đang tải...
+          </div>
+        </div>
       </div>
     );
   }
 
   if (error) {
     return (
-      <div className="class-list-page">
-        <div className="common-page-header">
-          <h1>Chi tiết lớp</h1>
-          <Link className="btn btn-secondary" to="/classes">
+      <div className="min-h-screen bg-slate-100 px-4 py-6">
+        <div className="mx-auto max-w-6xl space-y-4">
+          <div className="rounded-2xl bg-white/95 px-4 py-3 shadow-lg shadow-slate-900/5">
+            <h1 className="text-xl font-bold text-slate-900">Chi tiết lớp</h1>
+          </div>
+          <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
+            {error}
+          </div>
+          <Link className="inline-flex rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50" to="/classes">
             Quay lại
           </Link>
         </div>
-        <div style={{ padding: 16, background: "#fff", borderRadius: 8 }}>{error}</div>
       </div>
     );
   }
 
   const schoolName = classEntity?.school?.name;
   const schoolYearName = classEntity?.schoolYear?.name;
-  const homeroomTeacherName = classEntity?.homeroomTeacher?.fullName;
+  const homeroomTeacherName = classEntity?.homeroomTeacher?.fullName || "Chưa có";
+  const schoolOptions = classEntity?.school ? [classEntity.school] : [];
 
   return (
-    <div className="class-list-page">
-      <div className="common-page-header">
-        <div>
-          <h1>Chi tiết lớp học</h1>
-          <div style={{ color: "#6b7280", marginTop: 4 }}>
-            {safeText(classEntity?.name)} · ID: {safeText(classEntity?.id)}
+    <div className="min-h-screen bg-slate-100 px-4 py-6">
+      <div className="mx-auto max-w-6xl space-y-4">
+        <div className="rounded-2xl bg-white/95 px-4 py-3 shadow-lg shadow-slate-900/5">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h1 className="text-xl font-bold text-slate-900">Chi tiết lớp học</h1>
+              <div className="mt-1 text-sm text-slate-500">
+                Lớp: {safeText(classEntity?.name)} - Niên khóa: {safeText(schoolYearName)}
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <Link className="rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50" to="/classes">
+                Quay lại
+              </Link>
+              {canEditClass && (
+                <button
+                  type="button"
+                  className="rounded-full bg-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow-md shadow-indigo-500/30 hover:bg-indigo-500"
+                  onClick={openEditModal}
+                >
+                  Sửa lớp
+                </button>
+              )}
+            </div>
           </div>
         </div>
-        <div style={{ display: "flex", gap: 8 }}>
-          <Link className="btn btn-secondary" to="/classes">
-            Quay lại
-          </Link>
-          <Link className="btn btn-primary" to={`/classes/${classId}/edit`}>
-            Sửa lớp
-          </Link>
-        </div>
-      </div>
 
-      <div style={{ display: "flex", gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
-        {tabs.map((t) => (
-          <button
-            key={t.id}
-            type="button"
-            className="btn btn-secondary"
-            onClick={() => setActiveTab(t.id)}
-            style={{
-              background: activeTab === t.id ? "#111827" : undefined,
-              color: activeTab === t.id ? "#fff" : undefined,
-              borderColor: activeTab === t.id ? "#111827" : undefined,
-            }}
-          >
-            {t.label}
-          </button>
-        ))}
-      </div>
+        <div className="flex flex-wrap gap-2">
+          {visibleTabs.map((t) => (
+            <button
+              key={t.id}
+              type="button"
+              className={`rounded-full px-4 py-2 text-sm font-semibold transition ${
+                activeTab === t.id
+                  ? "bg-slate-900 text-white"
+                  : "border border-slate-200 bg-white text-slate-700 hover:bg-slate-50"
+              }`}
+              onClick={() => setActiveTab(t.id)}
+            >
+              {t.label}
+            </button>
+          ))}
+        </div>
 
       {activeTab === "overview" && (
-        <div style={{ background: "#fff", borderRadius: 8, padding: 16 }}>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 12 }}>
+        <div className="rounded-2xl border border-slate-200 bg-white/95 p-4 shadow-xl shadow-slate-900/5">
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
             <div>
-              <div style={{ color: "#6b7280", fontSize: 12 }}>Trường</div>
-              <div style={{ fontWeight: 600 }}>{safeText(schoolName)}</div>
+              <div className="text-xs text-slate-500">Trường</div>
+              <div className="font-semibold text-slate-800">{safeText(schoolName)}</div>
             </div>
             <div>
-              <div style={{ color: "#6b7280", fontSize: 12 }}>Năm học</div>
-              <div style={{ fontWeight: 600 }}>{safeText(schoolYearName)}</div>
+              <div className="text-xs text-slate-500">Năm học</div>
+              <div className="font-semibold text-slate-800">{safeText(schoolYearName)}</div>
             </div>
             <div>
-              <div style={{ color: "#6b7280", fontSize: 12 }}>GVCN</div>
-              <div style={{ fontWeight: 600 }}>{safeText(homeroomTeacherName)}</div>
+              <div className="text-xs text-slate-500">GVCN</div>
+              <div className="font-semibold text-slate-800">{safeText(homeroomTeacherName)}</div>
             </div>
             <div>
-              <div style={{ color: "#6b7280", fontSize: 12 }}>Phòng</div>
-              <div style={{ fontWeight: 600 }}>{safeText(classEntity?.room, "Chưa có phòng")}</div>
+              <div className="text-xs text-slate-500">Phòng</div>
+              <div className="font-semibold text-slate-800">{safeText(classEntity?.room, "Chưa có phòng")}</div>
             </div>
             <div>
-              <div style={{ color: "#6b7280", fontSize: 12 }}>Sĩ số</div>
-              <div style={{ fontWeight: 600 }}>
+              <div className="text-xs text-slate-500">Sĩ số</div>
+              <div className="font-semibold text-slate-800">
                 {(classEntity?.studentCount ?? students.length ?? 0)}/{safeText(classEntity?.capacity, "0")}
               </div>
             </div>
             <div>
-              <div style={{ color: "#6b7280", fontSize: 12 }}>Trạng thái</div>
-              <div style={{ fontWeight: 600 }}>{safeText(classEntity?.status)}</div>
+              <div className="text-xs text-slate-500">Trạng thái</div>
+              <div className="font-semibold text-slate-800">{toStudyStatus(classEntity?.status)}</div>
             </div>
           </div>
         </div>
       )}
 
       {activeTab === "students" && (
-        <div className="common-table-container" style={{ marginTop: 0 }}>
-          <div style={{ padding: "12px 16px", fontWeight: 700 }}>Danh sách học sinh ({students.length})</div>
-          <table className="common-table">
-            <thead>
-              <tr>
-                <th>Họ tên</th>
-                <th>Email</th>
-                <th>Trạng thái</th>
-              </tr>
-            </thead>
-            <tbody>
-              {students.length === 0 ? (
+        <div className="rounded-2xl border border-slate-200 bg-white/95 shadow-xl shadow-slate-900/5 overflow-hidden">
+          <div className="px-4 py-3 font-semibold text-slate-800">Danh sách học sinh ({students.length})</div>
+          <div className="overflow-x-auto">
+            <table className="min-w-full border-collapse text-sm">
+              <thead className="bg-slate-50 text-xs font-semibold uppercase tracking-wide text-slate-500">
                 <tr>
-                  <td colSpan={3} style={{ padding: 16, color: "#6b7280" }}>
-                    Chưa có học sinh trong lớp.
-                  </td>
+                  <th className="px-4 py-3 text-left">Họ tên</th>
+                  <th className="px-4 py-3 text-left">Email</th>
+                  <th className="px-4 py-3 text-left">Trạng thái</th>
                 </tr>
-              ) : (
-                students.map((s) => (
-                  <tr key={s.id}>
-                    <td>{safeText(s.fullName)}</td>
-                    <td>{safeText(s.email)}</td>
-                    <td>{safeText(s.status)}</td>
+              </thead>
+              <tbody className="text-sm text-slate-700">
+                {students.length === 0 ? (
+                  <tr>
+                    <td colSpan={3} className="px-4 py-4 text-slate-500">
+                      Chưa có học sinh trong lớp.
+                    </td>
                   </tr>
-                ))
-              )}
-            </tbody>
-          </table>
+                ) : (
+                  students.map((s) => (
+                    <tr key={s.id} className="border-t border-slate-100">
+                      <td className="px-4 py-3">{safeText(s.fullName)}</td>
+                      <td className="px-4 py-3">{safeText(s.email)}</td>
+                      <td className="px-4 py-3">{toStudyStatus(s.status)}</td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
         </div>
       )}
 
-      {activeTab === "sections" && (
-        <div className="common-table-container" style={{ marginTop: 0 }}>
-          <div style={{ padding: "12px 16px", fontWeight: 700 }}>Lớp học phần ({classSections.length})</div>
+      {activeTab === "sections" && canViewSectionsTab && (
+        <div className="rounded-2xl border border-slate-200 bg-white/95 shadow-xl shadow-slate-900/5 overflow-hidden">
+          <div className="px-4 py-3 font-semibold text-slate-800">Lớp học phần ({classSections.length})</div>
 
-          <form onSubmit={handleCreateSection} style={{ padding: "0 16px 12px 16px" }}>
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 12 }}>
-              <div className="common-form-group">
-                <label>Môn học *</label>
+          <form onSubmit={handleCreateSection} className="px-4 pb-3">
+            <div className="grid grid-cols-1 gap-3 md:grid-cols-2 lg:grid-cols-3">
+              <div>
+                <label className="mb-1 block text-sm font-medium text-slate-700">Môn học *</label>
                 <select
                   value={createForm.subjectId}
                   onChange={(e) => setCreateForm((p) => ({ ...p, subjectId: e.target.value }))}
                   required
+                  className="h-10 w-full rounded-lg border border-slate-300 bg-white px-3 text-sm"
                 >
                   <option value="">Chọn môn</option>
                   {subjects.map((s) => (
@@ -378,12 +496,13 @@ const ClassDetailPage = () => {
                   ))}
                 </select>
               </div>
-              <div className="common-form-group">
-                <label>Giáo viên *</label>
+              <div>
+                <label className="mb-1 block text-sm font-medium text-slate-700">Giáo viên *</label>
                 <select
                   value={createForm.teacherId}
                   onChange={(e) => setCreateForm((p) => ({ ...p, teacherId: e.target.value }))}
                   required
+                  className="h-10 w-full rounded-lg border border-slate-300 bg-white px-3 text-sm"
                 >
                   <option value="">Chọn giáo viên</option>
                   {(teachersBySubjectLoading ? teachers : teachersForSelectedSubject).map((t) => (
@@ -393,32 +512,35 @@ const ClassDetailPage = () => {
                   ))}
                 </select>
               </div>
-              <div className="common-form-group">
-                <label>Học kỳ *</label>
+              <div>
+                <label className="mb-1 block text-sm font-medium text-slate-700">Học kỳ *</label>
                 <select
                   value={createForm.semester}
                   onChange={(e) => setCreateForm((p) => ({ ...p, semester: e.target.value }))}
                   required
+                  className="h-10 w-full rounded-lg border border-slate-300 bg-white px-3 text-sm"
                 >
                   <option value="HK1">HK1</option>
                   <option value="HK2">HK2</option>
                 </select>
               </div>
-              <div className="common-form-group">
-                <label>Năm học *</label>
+              <div>
+                <label className="mb-1 block text-sm font-medium text-slate-700">Năm học *</label>
                 <input
                   type="text"
                   value={createForm.schoolYear}
                   onChange={(e) => setCreateForm((p) => ({ ...p, schoolYear: e.target.value }))}
                   placeholder="VD: 2024-2025"
                   required
+                  className="h-10 w-full rounded-lg border border-slate-300 bg-white px-3 text-sm"
                 />
               </div>
-              <div className="common-form-group">
-                <label>Trạng thái</label>
+              <div>
+                <label className="mb-1 block text-sm font-medium text-slate-700">Trạng thái</label>
                 <select
                   value={createForm.status}
                   onChange={(e) => setCreateForm((p) => ({ ...p, status: e.target.value }))}
+                  className="h-10 w-full rounded-lg border border-slate-300 bg-white px-3 text-sm"
                 >
                   <option value="ACTIVE">Hoạt động</option>
                   <option value="INACTIVE">Không hoạt động</option>
@@ -426,18 +548,14 @@ const ClassDetailPage = () => {
               </div>
             </div>
 
-            {createError && (
-              <div style={{ marginTop: 10, color: "#b91c1c", fontWeight: 600 }}>
-                {createError}
-              </div>
-            )}
+            {createError && <div className="mt-2 text-sm font-semibold text-rose-700">{createError}</div>}
 
-            <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
-              <button className="btn btn-primary" type="submit" disabled={creating}>
+            <div className="mt-3 flex gap-2">
+              <button className="rounded-full bg-indigo-600 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-500" type="submit" disabled={creating}>
                 {creating ? "Đang tạo..." : "Tạo lớp học phần"}
               </button>
               <button
-                className="btn btn-secondary"
+                className="rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50"
                 type="button"
                 onClick={() => {
                   setCreateError("");
@@ -455,51 +573,65 @@ const ClassDetailPage = () => {
             </div>
           </form>
 
-          <table className="common-table">
-            <thead>
-              <tr>
-                <th>Môn học</th>
-                <th>Giáo viên</th>
-                <th>Học kỳ</th>
-                <th>Năm học</th>
-                <th>Trạng thái</th>
-                {canManageSections && <th>Thao tác</th>}
-              </tr>
-            </thead>
-            <tbody>
-              {classSections.length === 0 ? (
+          <div className="overflow-x-auto">
+            <table className="min-w-full border-collapse text-sm">
+              <thead className="bg-slate-50 text-xs font-semibold uppercase tracking-wide text-slate-500">
                 <tr>
-                  <td colSpan={canManageSections ? 6 : 5} style={{ padding: 16, color: "#6b7280" }}>
-                    Chưa có lớp học phần cho lớp này.
-                  </td>
+                  <th className="px-4 py-3 text-left">Môn học</th>
+                  <th className="px-4 py-3 text-left">Giáo viên</th>
+                  <th className="px-4 py-3 text-left">Học kỳ</th>
+                  <th className="px-4 py-3 text-left">Năm học</th>
+                  <th className="px-4 py-3 text-left">Trạng thái</th>
+                  {canManageSections && <th className="px-4 py-3 text-left">Thao tác</th>}
                 </tr>
-              ) : (
-                classSections.map((cs) => (
-                  <tr key={cs.id}>
-                    <td>{safeText(cs.subject?.name)}</td>
-                    <td>{safeText(cs.teacher?.fullName)}</td>
-                    <td>{safeText(cs.semester)}</td>
-                    <td>{safeText(cs.schoolYear)}</td>
-                    <td>{safeText(cs.status)}</td>
-                    {canManageSections && (
-                      <td>
-                        <button
-                          type="button"
-                          className="btn btn-danger"
-                          disabled={deletingId === cs.id}
-                          onClick={() => handleDeleteSection(cs.id)}
-                        >
-                          {deletingId === cs.id ? "Đang xóa..." : "Xóa"}
-                        </button>
-                      </td>
-                    )}
+              </thead>
+              <tbody className="text-sm text-slate-700">
+                {classSections.length === 0 ? (
+                  <tr>
+                    <td colSpan={canManageSections ? 6 : 5} className="px-4 py-4 text-slate-500">
+                      Chưa có lớp học phần cho lớp này.
+                    </td>
                   </tr>
-                ))
-              )}
-            </tbody>
-          </table>
+                ) : (
+                  classSections.map((cs) => (
+                    <tr key={cs.id} className="border-t border-slate-100">
+                      <td className="px-4 py-3">{safeText(cs.subject?.name)}</td>
+                      <td className="px-4 py-3">{safeText(cs.teacher?.fullName)}</td>
+                      <td className="px-4 py-3">{safeText(cs.semester)}</td>
+                      <td className="px-4 py-3">{safeText(cs.schoolYear)}</td>
+                      <td className="px-4 py-3">{safeText(cs.status)}</td>
+                      {canManageSections && (
+                        <td className="px-4 py-3">
+                          <button
+                            type="button"
+                            className="rounded-full bg-rose-100 px-3 py-1.5 text-xs font-semibold text-rose-700 hover:bg-rose-200"
+                            disabled={deletingId === cs.id}
+                            onClick={() => handleDeleteSection(cs.id)}
+                          >
+                            {deletingId === cs.id ? "Đang xóa..." : "Xóa"}
+                          </button>
+                        </td>
+                      )}
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
         </div>
       )}
+      </div>
+      <ClassFormModal
+        open={showEditModal}
+        editingClass={classEntity}
+        formData={editFormData}
+        setFormData={setEditFormData}
+        handleSubmit={handleUpdateClass}
+        handleCloseModal={() => setShowEditModal(false)}
+        user={user}
+        schools={schoolOptions}
+        availableHomeroomTeachers={teachers}
+      />
     </div>
   );
 };

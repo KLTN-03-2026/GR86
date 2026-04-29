@@ -1,8 +1,10 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Link } from 'react-router-dom';
 import { Pencil, Trash2 } from 'lucide-react';
+import { toast } from 'react-toastify';
 import { useAuth } from '../../../auth/context/AuthContext';
 import api from '../../../../shared/lib/api';
+import { isTeachingActiveClass } from '../../../../shared/lib/classStatus';
 import './UserListPage.css';
 import CreateUserModal from './components/CreateUserModal';
 import ImportUsersExcelModal from './components/ImportUsersExcelModal';
@@ -362,7 +364,8 @@ const UserListPage = () => {
     setBulkClassLoading(true);
     try {
       const res = await api.get(`/classes/school/${schoolId}`);
-      setBulkClasses(res.data?.classes || res.data || []);
+      const all = res.data?.classes || res.data || [];
+      setBulkClasses(all.filter(isTeachingActiveClass));
     } catch (_) {
       setBulkClasses([]);
     } finally {
@@ -428,10 +431,10 @@ const UserListPage = () => {
 
       <CreateUserModal
         open={showCreateModal}
+        isSuperAdmin={isSuperAdmin}
         onClose={() => setShowCreateModal(false)}
         onCreated={() => {
-          setSuccess('Tạo người dùng thành công.');
-          setTimeout(() => setSuccess(''), 3000);
+          toast.success(isSuperAdmin ? 'Tạo quản trị viên thành công.' : 'Tạo người dùng thành công.');
           fetchUsers();
         }}
       />
@@ -593,13 +596,14 @@ const UserListPage = () => {
                     : 'Bắt đầu bằng cách tạo người dùng mới.'
                   : 'Hãy thử thay đổi điều kiện lọc hoặc từ khóa tìm kiếm.'}
               </p>
-              <Link
-                to="/users/create"
+              <button
+                type="button"
+                onClick={() => setShowCreateModal(true)}
                 className="inline-flex items-center gap-2 rounded-full bg-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow-md shadow-indigo-500/30 hover:bg-indigo-500"
               >
                 <span className="text-lg leading-none">＋</span>
                 <span>{isSuperAdmin ? 'Thêm quản trị mới' : 'Thêm người dùng mới'}</span>
-              </Link>
+              </button>
             </div>
           ) : (
             <>
@@ -619,6 +623,7 @@ const UserListPage = () => {
                       </th>
                       <th className="px-4 py-3 text-left">Người dùng</th>
                       <th className="px-4 py-3 text-left">Vai trò</th>
+                      {isSuperAdmin && <th className="px-4 py-3 text-left">Trường</th>}
                       {!isSuperAdmin && <th className="px-4 py-3 text-left">GVCN lớp</th>}
                       {isAdmin && <th className="px-4 py-3 text-left">Liên kết</th>}
                       <th className="px-4 py-3 text-left">Trạng thái</th>
@@ -652,7 +657,7 @@ const UserListPage = () => {
 
                           <td className="px-4 py-3">
                             <div className="flex items-center gap-3">
-                              <div className="flex h-10 w-10 items-center justify-center rounded-full bg-gradient-to-br from-indigo-500 to-purple-500 text-sm font-semibold text-white">
+                              <div className="flex h-10 w-10 items-center justify-center rounded-full bg-linear-to-br from-indigo-500 to-purple-500 text-sm font-semibold text-white">
                                 {userItem.fullName?.charAt(0)?.toUpperCase() ||
                                   userItem.email?.charAt(0)?.toUpperCase() ||
                                   'A'}
@@ -695,6 +700,19 @@ const UserListPage = () => {
                               })()
                             )}
                           </td>
+
+                          {isSuperAdmin && (
+                            <td className="px-4 py-3">
+                              {userItem.school?.name ? (
+                                <div className="flex flex-col">
+                                  <span className="text-sm font-medium text-slate-800">{userItem.school.name}</span>
+                                  <span className="text-xs text-slate-500">{userItem.school.code || '—'}</span>
+                                </div>
+                              ) : (
+                                <span className="text-slate-400">—</span>
+                              )}
+                            </td>
+                          )}
 
                           {!isSuperAdmin && (
                             <td className="px-4 py-3">

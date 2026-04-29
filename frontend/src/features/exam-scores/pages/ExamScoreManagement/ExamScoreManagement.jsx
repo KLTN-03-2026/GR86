@@ -5,6 +5,12 @@ import { useAuth } from '../../../auth/context/AuthContext';
 import { Pencil, Trash2, Search, Download } from 'lucide-react';
 import { scoreCellClass } from '../../utils/scoreGridHelpers';
 import { normalizeSemesterCode } from '../../utils/semesterNormalize';
+import {
+  buildTeacherVisibleClasses,
+  teacherClassIdsFromSections,
+  teacherSubjectIdsFromSections,
+} from '../../../../shared/lib/teacherScope';
+import { isTeachingActiveClass } from '../../../../shared/lib/classStatus';
 
 const ADMIN_VIEW_SEMESTERS = [
   { value: '1', label: 'Học kỳ 1' },
@@ -573,33 +579,22 @@ const ExamScoreManagement = () => {
         allScores = [];
       }
 
-      // For teachers, only show scores for subjects they teach
+      // Teacher score visibility follows class_sections (teaching assignment source of truth).
       if (userRole === 'TEACHER' && user?.id) {
         try {
-          // Fetch schedules for this teacher
-          const schedulesResponse = await api.get(`/schedules/teacher/${user.id}`);
-          const teacherSchedules = schedulesResponse.data.schedules || [];
-
-          // Get unique subject IDs from schedules
-          const assignedSubjectIds = new Set();
-          teacherSchedules.forEach(schedule => {
-            const subjectId = schedule.subject?.id || schedule.subject_id;
-            if (subjectId) {
-              assignedSubjectIds.add(subjectId);
-            }
-          });
-
-          console.log('Teacher assigned subject IDs:', Array.from(assignedSubjectIds));
-
-          // Filter scores to only show those for assigned subjects
+          const sectionRes = await api.get(`/class-sections/teacher/${user.id}`);
+          const sections = sectionRes.data.classSections || [];
+          const assignedSubjectIds = teacherSubjectIdsFromSections(sections);
+          const assignedClassIds = teacherClassIdsFromSections(sections);
           allScores = allScores.filter(score => {
-            const scoreSubjectId = score.subject?.id || score.subject_id;
-            return assignedSubjectIds.has(scoreSubjectId);
+            const scoreSubjectId = Number(score.subject?.id || score.subject_id);
+            const scoreClassId = Number(score.classEntity?.id || score.class_id);
+            const subjectAllowed = Number.isFinite(scoreSubjectId) && assignedSubjectIds.has(scoreSubjectId);
+            const classAllowed = Number.isFinite(scoreClassId) && assignedClassIds.has(scoreClassId);
+            return subjectAllowed && classAllowed;
           });
-
-          console.log('Filtered exam scores for teacher:', allScores.length);
-        } catch (scheduleError) {
-          console.error('Error fetching teacher schedules:', scheduleError);
+        } catch (sectionError) {
+          console.error('Error fetching teacher class-sections:', sectionError);
           // If error, show no scores for teacher
           allScores = [];
         }
@@ -668,35 +663,20 @@ const ExamScoreManagement = () => {
         allSubjects = allSubjects.filter(subject => subject.school?.id === user.school.id);
       }
 
-      // Filter subjects for teacher - only show subjects they are assigned to teach
+      // Filter subjects for teacher - source of assignment is class_sections.
       if (userRole === 'TEACHER' && user?.id) {
         try {
-          // Fetch schedules for this teacher
-          const schedulesResponse = await api.get(`/schedules/teacher/${user.id}`);
-          const teacherSchedules = schedulesResponse.data.schedules || [];
-
-          // Get unique subject IDs from schedules
-          const assignedSubjectIds = new Set();
-          teacherSchedules.forEach(schedule => {
-            const subjectId = schedule.subject?.id || schedule.subject_id;
-            if (subjectId) {
-              assignedSubjectIds.add(subjectId);
-            }
-          });
-
-          console.log('Teacher assigned subject IDs:', Array.from(assignedSubjectIds));
-
-          // Filter subjects to only show assigned ones
+          const sectionRes = await api.get(`/class-sections/teacher/${user.id}`);
+          const sections = sectionRes.data.classSections || [];
+          const assignedSubjectIds = teacherSubjectIdsFromSections(sections);
           allSubjects = allSubjects.filter(subject => {
             const subjectId = subject.id;
             const isAssigned = assignedSubjectIds.has(subjectId);
             const isSameSchool = subject.school?.id === user.school?.id;
             return isAssigned && isSameSchool;
           });
-
-          console.log('Filtered subjects for teacher:', allSubjects);
-        } catch (scheduleError) {
-          console.error('Error fetching teacher schedules:', scheduleError);
+        } catch (sectionError) {
+          console.error('Error fetching teacher class-sections:', sectionError);
           // If error, still filter by school only
           if (user?.school?.id) {
             allSubjects = allSubjects.filter(subject => subject.school?.id === user.school.id);
@@ -721,37 +701,19 @@ const ExamScoreManagement = () => {
       if (userRole === 'ADMIN' && schoolId) {
         allClasses = allClasses.filter(cls => cls.school?.id === schoolId);
       } else if (userRole === 'TEACHER' && user?.id) {
-        // Filter classes for teacher - show all classes they teach (from schedules) + classes they are homeroom teacher for
+        // Filter classes for teacher by class_sections + homeroom.
         try {
-          // Fetch schedules for this teacher to get all classes they teach
-          const schedulesRes = await api.get(`/schedules/teacher/${user.id}`);
-          const teacherSchedules = schedulesRes.data.schedules || [];
-
-          // Get unique class IDs from schedules
-          const taughtClassIds = new Set();
-          teacherSchedules.forEach(schedule => {
-            const classId = schedule.classEntity?.id || schedule.class_id;
-            if (classId) {
-              taughtClassIds.add(classId);
-            }
+          const sectionRes = await api.get(`/class-sections/teacher/${user.id}`);
+          const sections = sectionRes.data.classSections || [];
+          allClasses = buildTeacherVisibleClasses({
+            allClasses,
+            classSections: sections,
+            teacherId: Number(user.id),
+            schoolId: Number(schoolId),
+            includeHomeroom: false,
           });
-
-          // Filter classes: show classes they teach OR classes they are homeroom teacher for
-          allClasses = allClasses.filter(cls => {
-            const isSameSchool = cls.school?.id === schoolId;
-            if (!isSameSchool) return false;
-
-            // Check if teacher is homeroom teacher
-            const homeroomTeacherId = cls.homeroomTeacher?.id || cls.homeroomTeacherId;
-            const isHomeroomTeacher = homeroomTeacherId === user.id;
-
-            // Check if teacher teaches this class (from schedules)
-            const isTeachingClass = taughtClassIds.has(cls.id);
-
-            return isHomeroomTeacher || isTeachingClass;
-          });
-        } catch (scheduleError) {
-          console.error('Error fetching teacher schedules:', scheduleError);
+        } catch (sectionError) {
+          console.error('Error fetching teacher class-sections:', sectionError);
           // If error, show no classes for teacher
           allClasses = [];
         }
@@ -925,24 +887,32 @@ const ExamScoreManagement = () => {
     }
   };
 
-  /** Môn học theo TKB + học kỳ (cùng logic lọc như admin Xem điểm) */
+  /** Môn học theo class_sections + học kỳ của giáo viên trong lớp đã chọn. */
   const loadSubjectsForTeacherClass = async (classId, semesterUi) => {
     if (!classId) {
       setFilteredSubjectsForClass([]);
       return;
     }
     try {
-      const schedulesResponse = await api.get(`/schedules/class/${classId}`);
-      const classSchedules = schedulesResponse.data.schedules || [];
       const selectedCls = classes.find((c) => String(c.id) === String(classId));
       const classSchoolYearName = selectedCls?.schoolYear?.name || selectedCls?.school_year?.name || '';
-      const schedulesForSem = classSchedules.filter((sch) =>
-        adminScheduleMatchesClassSemester(sch, semesterUi, classSchoolYearName)
-      );
+      const sectionsResponse = await api.get(`/class-sections/class/${classId}`);
+      const classSections = sectionsResponse.data.classSections || [];
+      const sectionsForTeacher = classSections.filter((cs) => {
+        const tid = cs.teacher?.id || cs.teacher_id;
+        if (String(tid) !== String(user?.id)) return false;
+        const sem = normalizeSemesterCode(cs.semester);
+        if (sem == null || sem !== semesterUi) return false;
+        const syClass = classSchoolYearName ? String(classSchoolYearName).trim() : '';
+        const syCs = cs.schoolYear != null ? String(cs.schoolYear).trim() : '';
+        if (syClass && syCs && syClass !== syCs) return false;
+        const status = String(cs.status || '').trim().toUpperCase();
+        return !status || status === 'ACTIVE';
+      });
 
       const assignedSubjectIds = new Set();
-      schedulesForSem.forEach((schedule) => {
-        const sid = schedule.subject?.id || schedule.subject_id;
+      sectionsForTeacher.forEach((cs) => {
+        const sid = cs.subject?.id || cs.subject_id;
         if (sid) assignedSubjectIds.add(sid);
       });
 
@@ -951,10 +921,9 @@ const ExamScoreManagement = () => {
         const subjectId = subject.id;
         const isAssignedToClass = assignedSubjectIds.has(subjectId);
         if (userRole === 'TEACHER' && user?.id) {
-          const isTaughtByTeacher = schedulesForSem.some((schedule) => {
-            const scheduleTeacherId = schedule.teacher?.id || schedule.teacher_id;
-            const scheduleSubjectId = schedule.subject?.id || schedule.subject_id;
-            return scheduleTeacherId === user.id && scheduleSubjectId === subjectId;
+          const isTaughtByTeacher = sectionsForTeacher.some((cs) => {
+            const scheduleSubjectId = cs.subject?.id || cs.subject_id;
+            return scheduleSubjectId === subjectId;
           });
           return isAssignedToClass && isTaughtByTeacher;
         }
@@ -1047,15 +1016,15 @@ const ExamScoreManagement = () => {
     let sem = '1';
     if (classId) {
       try {
-        const schedulesResponse = await api.get(`/schedules/class/${classId}`);
-        const classSchedules = schedulesResponse.data.schedules || [];
+        const sectionsResponse = await api.get(`/class-sections/class/${classId}`);
+        const classSections = sectionsResponse.data.classSections || [];
         const subNum = parseInt(subjectId, 10);
-        const matchSch = classSchedules.find((s) => {
+        const matchSch = classSections.find((s) => {
           const sid = s.subject?.id || s.subject_id;
           const tid = s.teacher?.id || s.teacher_id;
           return sid === subNum && user?.id && tid === user.id;
         });
-        const code = matchSch?.classSection ? normalizeSemesterCode(matchSch.classSection.semester) : null;
+        const code = matchSch ? normalizeSemesterCode(matchSch.semester) : null;
         if (code) sem = code;
       } catch (_) {
         /* giữ HK1 */
@@ -1111,24 +1080,22 @@ const ExamScoreManagement = () => {
         allScores = allScores.filter(score => String(score.student?.id) === String(activeStudentId));
       }
 
-      // For teachers, only show scores for subjects they teach
+      // For teachers, only show scores in their class-sections.
       if (userRole === 'TEACHER' && user?.id) {
         try {
-          const schedulesResponse = await api.get(`/schedules/teacher/${user.id}`);
-          const teacherSchedules = schedulesResponse.data.schedules || [];
-          const assignedSubjectIds = new Set();
-          teacherSchedules.forEach(schedule => {
-            const subjectId = schedule.subject?.id || schedule.subject_id;
-            if (subjectId) {
-              assignedSubjectIds.add(subjectId);
-            }
-          });
+          const sectionRes = await api.get(`/class-sections/teacher/${user.id}`);
+          const sections = sectionRes.data.classSections || [];
+          const assignedSubjectIds = teacherSubjectIdsFromSections(sections);
+          const assignedClassIds = teacherClassIdsFromSections(sections);
           allScores = allScores.filter(score => {
-            const scoreSubjectId = score.subject?.id || score.subject_id;
-            return assignedSubjectIds.has(scoreSubjectId);
+            const scoreSubjectId = Number(score.subject?.id || score.subject_id);
+            const scoreClassId = Number(score.classEntity?.id || score.class_id);
+            return Number.isFinite(scoreSubjectId) && Number.isFinite(scoreClassId)
+              && assignedSubjectIds.has(scoreSubjectId)
+              && assignedClassIds.has(scoreClassId);
           });
-        } catch (scheduleError) {
-          console.error('Error fetching teacher schedules:', scheduleError);
+        } catch (sectionError) {
+          console.error('Error fetching teacher class-sections:', sectionError);
           allScores = [];
         }
       }
@@ -1582,6 +1549,17 @@ const ExamScoreManagement = () => {
     return <span className={`es-score-pill ${scoreCellClass(n)}`}>{n.toFixed(1)}</span>;
   };
 
+  const userRole = user?.role?.name?.toUpperCase();
+  const isStudent = userRole === 'STUDENT';
+  const isParent = userRole === 'PARENT';
+  const isAdmin = userRole === 'ADMIN' || (userRole && userRole.startsWith('ADMIN'));
+  const isViewOnly = isStudent || isParent;
+  const viewClasses = classes || [];
+  const actionClasses = useMemo(
+    () => viewClasses.filter(isTeachingActiveClass),
+    [viewClasses]
+  );
+
   if (loading) {
     return (
       <div className="min-h-screen bg-slate-100 px-4 py-6">
@@ -1594,12 +1572,6 @@ const ExamScoreManagement = () => {
       </div>
     );
   }
-
-  const userRole = user?.role?.name?.toUpperCase();
-  const isStudent = userRole === 'STUDENT';
-  const isParent = userRole === 'PARENT';
-  const isAdmin = userRole === 'ADMIN' || (userRole && userRole.startsWith('ADMIN'));
-  const isViewOnly = isStudent || isParent;
 
   const handleToggleLock = async () => {
     const userRole = user?.role?.name?.toUpperCase();
@@ -1723,7 +1695,7 @@ const ExamScoreManagement = () => {
                 }}
               >
                 <option value="">-- Tất cả các lớp --</option>
-                {classes.map(cls => (
+                {viewClasses.map(cls => (
                   <option key={cls.id} value={cls.id}>
                     {cls.name}
                   </option>
@@ -1817,6 +1789,20 @@ const ExamScoreManagement = () => {
               >
                 {teacherImporting ? 'Đang import...' : 'Import'}
               </button>
+              <a
+                href="/MauFileNhapdiem.xlsx"
+                download
+                style={{
+                  padding: '8px 12px',
+                  borderRadius: '6px',
+                  backgroundColor: '#28a745',
+                  color: 'white',
+                  textDecoration: 'none',
+                  display: 'inline-block'
+                }}
+              >
+                ⬇ Tải file mẫu
+              </a>
             </div>
           </div>
         </>
@@ -2068,7 +2054,7 @@ const ExamScoreManagement = () => {
                     required
                   >
                     <option value="">Chọn lớp</option>
-                    {classes.map((classItem) => (
+                    {actionClasses.map((classItem) => (
                       <option key={classItem.id} value={classItem.id}>
                         {classItem.name}
                       </option>
@@ -2458,6 +2444,21 @@ const ExamScoreManagement = () => {
 
               {aiStudentResult?.analysis ? (
                 <>
+                  {(() => {
+                    const analysis = aiStudentResult.analysis || {};
+                    const source = analysis.source || aiStudentResult.source;
+                    if (!source) return null;
+                    const aiSuccess = analysis.aiSuccess ?? aiStudentResult.aiSuccess;
+                    const aiError = analysis.aiError || aiStudentResult.aiError;
+                    const label = source === 'GEMINI' ? 'Gemini' : 'Hệ thống / dự phòng';
+                    const reason = aiSuccess === false && aiError ? ` (${aiError})` : '';
+                    return (
+                      <div style={{ marginBottom: '0.5rem', fontSize: '0.85rem', color: '#64748b' }}>
+                        Nguồn phần mềm: <strong style={{ color: '#0f172a' }}>{label}</strong>{reason}
+                      </div>
+                    );
+                  })()}
+
                   <div
                     style={{
                       padding: '0.75rem',
@@ -2491,12 +2492,6 @@ const ExamScoreManagement = () => {
                       return lines.join('\n').trim() || 'Không có nội dung phân tích.';
                     })()}
                   </div>
-
-                  {aiStudentResult?.analysis?.source === 'GEMINI' && aiStudentResult?.analysis?.aiSuccess === true ? (
-                    <div style={{ marginTop: '0.5rem', fontSize: '0.85rem', color: '#64748b' }}>
-                      Nguồn: <strong style={{ color: '#0f172a' }}>GEMINI</strong>
-                    </div>
-                  ) : null}
 
                   <div style={{ marginTop: '0.75rem', fontSize: '0.9rem', color: '#475569' }}>
                     {aiStudentResult.hasUnderAverage ? (

@@ -23,21 +23,30 @@ public class AuthService {
      * Validates credentials, checks school lock, returns response payload for login.
      * @throws BadRequestException if credentials invalid or school locked
      */
-    public Map<String, Object> login(String email, String password) {
+    public Map<String, Object> login(String email, String password, Integer schoolId) {
         if (email == null || password == null) {
-            throw new BadRequestException("Email and password are required");
+            throw new BadRequestException("Vui lòng nhập đầy đủ email và mật khẩu.");
         }
 
         User user;
         try {
-            user = userService.findByEmail(email);
+            if (schoolId != null) {
+                user = userService.findByEmailAndSchoolId(email, schoolId);
+            } else {
+                user = userService.findByEmail(email);
+            }
         } catch (ResourceNotFoundException ex) {
-            throw new BadRequestException("Invalid credentials");
+            throw new BadRequestException("Email hoặc mật khẩu không chính xác.");
         }
 
         if (!passwordEncoder.matches(password, user.getPasswordHash()) &&
                 !password.equals(user.getPasswordHash())) {
-            throw new BadRequestException("Invalid credentials");
+            throw new BadRequestException("Email hoặc mật khẩu không chính xác.");
+        }
+
+        String userStatus = user.getStatus() != null ? user.getStatus().trim().toUpperCase() : "";
+        if (!userStatus.isEmpty() && !"ACTIVE".equals(userStatus)) {
+            throw new BadRequestException("Tài khoản của bạn đang bị khóa hoặc ngưng hoạt động. Vui lòng liên hệ quản trị viên.");
         }
 
         String roleName = user.getRole().getName().toUpperCase();
@@ -72,9 +81,12 @@ public class AuthService {
                 throw new BadRequestException("Tài khoản của bạn không thể đăng nhập vì trường học đã bị khóa. Vui lòng liên hệ quản trị viên.");
             }
         }
+        if (!isSuperAdmin && user.getSchool() == null) {
+            throw new BadRequestException("Tài khoản của bạn chưa được gán trường. Vui lòng liên hệ Super Admin.");
+        }
 
         Map<String, Object> response = new HashMap<>();
-        response.put("message", "Login successful");
+        response.put("message", "Đăng nhập thành công");
 
         Map<String, Object> userInfo = new HashMap<>();
         userInfo.put("id", user.getId());

@@ -9,6 +9,9 @@ import com.example.schoolmanagement.entity.ParentStudent;
 import com.example.schoolmanagement.entity.Subject;
 import com.example.schoolmanagement.entity.TeacherSubject;
 import com.example.schoolmanagement.exception.BadRequestException;
+import com.example.schoolmanagement.util.EmailFormat;
+import com.example.schoolmanagement.util.ClassStatusPolicy;
+import com.example.schoolmanagement.util.PhoneFormat;
 import com.example.schoolmanagement.exception.ForbiddenException;
 import com.example.schoolmanagement.exception.ResourceNotFoundException;
 import com.example.schoolmanagement.repository.UserRepository;
@@ -28,6 +31,7 @@ import com.example.schoolmanagement.repository.RefreshTokenRepository;
 import com.example.schoolmanagement.repository.ParentStudentRepository;
 import com.example.schoolmanagement.repository.SubjectRepository;
 import com.example.schoolmanagement.repository.TeacherSubjectRepository;
+import com.example.schoolmanagement.repository.ClassSectionRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -43,6 +47,7 @@ import java.util.stream.Collectors;
 public class UserService {
 
     private static final Logger log = LoggerFactory.getLogger(UserService.class);
+    private static final int MAX_PARENTS_PER_STUDENT = 2;
 
     @Autowired
     private UserRepository userRepository;
@@ -97,6 +102,9 @@ public class UserService {
 
     @Autowired
     private TeacherSubjectRepository teacherSubjectRepository;
+
+    @Autowired
+    private ClassSectionRepository classSectionRepository;
 
     public List<User> getAllUsers() {
         return userRepository.findAll();
@@ -186,8 +194,22 @@ public class UserService {
     }
 
     public User findByEmail(String email) {
-        return userRepository.findByEmail(email)
-                .orElseThrow(() -> new ResourceNotFoundException("User not found with email: " + email));
+        List<User> users = userRepository.findAllByEmail(email);
+        if (users.isEmpty()) {
+            throw new ResourceNotFoundException("User not found with email: " + email);
+        }
+        if (users.size() > 1) {
+            throw new BadRequestException("Email thuộc nhiều tài khoản ở các trường khác nhau. Vui lòng đăng nhập kèm thông tin trường.");
+        }
+        return users.get(0);
+    }
+
+    public User findByEmailAndSchoolId(String email, Integer schoolId) {
+        if (email == null || schoolId == null) {
+            throw new ResourceNotFoundException("User not found with email and school.");
+        }
+        return userRepository.findByEmailAndSchoolId(email, schoolId)
+                .orElseThrow(() -> new ResourceNotFoundException("User not found with email in school: " + email));
     }
 
     public User saveUser(User user) {
@@ -433,14 +455,13 @@ public class UserService {
     }
 
     public boolean existsByEmail(String email) {
-        return email != null && userRepository.findByEmail(email).isPresent();
+        if (email == null) return false;
+        return userRepository.existsByEmailGlobal(email);
     }
 
     public boolean isEmailTakenByOtherUser(String email, Integer excludeUserId) {
         if (email == null) return false;
-        return userRepository.findByEmail(email)
-                .filter(u -> !u.getId().equals(excludeUserId))
-                .isPresent();
+        return userRepository.existsByEmailGlobalAndIdNot(email, excludeUserId);
     }
 
     @Transactional(readOnly = true)
@@ -534,15 +555,16 @@ public class UserService {
                 userMap.put("rollno", enrollment.getRollno());
             }
         } else if (isTeacher) {
-            List<com.example.schoolmanagement.entity.Schedule> schedules = scheduleRepository.findByTeacherId(u.getId());
+            List<com.example.schoolmanagement.entity.ClassSection> sections =
+                    classSectionRepository.findByTeacherIdFetchAll(u.getId());
             Set<Integer> classIds = new HashSet<>();
             List<Map<String, Object>> classesList = new ArrayList<>();
-            for (com.example.schoolmanagement.entity.Schedule schedule : schedules) {
-                if (schedule.getClassEntity() != null) {
-                    Integer classId = schedule.getClassEntity().getId();
+            for (com.example.schoolmanagement.entity.ClassSection cs : sections) {
+                if (cs.getClassRoom() != null) {
+                    Integer classId = cs.getClassRoom().getId();
                     if (!classIds.contains(classId)) {
                         classIds.add(classId);
-                        ClassEntity ce = schedule.getClassEntity();
+                        ClassEntity ce = cs.getClassRoom();
                         Map<String, Object> classMap = new HashMap<>();
                         classMap.put("id", ce.getId());
                         classMap.put("name", ce.getName());
@@ -595,13 +617,48 @@ public class UserService {
         return null;
     }
 
+    /**
+     * Enforce nghiệp vụ: mỗi học sinh tối đa {@value #MAX_PARENTS_PER_STUDENT} phụ huynh.
+     * Nếu phụ huynh hiện tại đã liên kết với học sinh thì không tính là thêm mới.
+     */
+    private void assertStudentParentLimit(Integer studentId, Integer parentIdToLink) {
+        if (studentId == null) return;
+        List<ParentStudent> links = parentStudentRepository.findByStudentId(studentId);
+        long linkedParentCount = links.stream()
+                .map(ParentStudent::getParent)
+                .filter(Objects::nonNull)
+                .map(User::getId)
+                .filter(Objects::nonNull)
+                .distinct()
+                .count();
+
+        boolean alreadyLinked = parentIdToLink != null && links.stream()
+                .anyMatch(ps -> ps.getParent() != null && parentIdToLink.equals(ps.getParent().getId()));
+
+        if (!alreadyLinked && linkedParentCount >= MAX_PARENTS_PER_STUDENT) {
+            throw new BadRequestException(
+                    "Học sinh id=" + studentId + " đã đạt tối đa " + MAX_PARENTS_PER_STUDENT + " phụ huynh.");
+        }
+    }
+
     public User createUser(Map<String, Object> userData, String currentUserRole, Integer currentUserSchoolId) {
         if (currentUserRole == null || (!"SUPER_ADMIN".equals(currentUserRole) && !"ADMIN".equals(currentUserRole))) {
             throw new ForbiddenException("Access denied");
         }
         User user = new User();
-        user.setEmail((String) userData.get("email"));
-        user.setFullName((String) userData.get("fullName"));
+        String email = userData.get("email") != null ? userData.get("email").toString().trim() : null;
+        if (email == null || email.isEmpty()) {
+            throw new BadRequestException("Email là bắt buộc");
+        }
+        if (!EmailFormat.isValid(email)) {
+            throw new BadRequestException("Email không hợp lệ");
+        }
+        String fullName = userData.get("fullName") != null ? userData.get("fullName").toString().trim() : null;
+        if (fullName == null || fullName.isEmpty()) {
+            throw new BadRequestException("Họ tên là bắt buộc");
+        }
+        user.setEmail(email);
+        user.setFullName(fullName);
         user.setStatus((String) userData.getOrDefault("status", "ACTIVE"));
         String password = (String) userData.get("password");
         if (password != null) user.setPasswordHash(password);
@@ -627,6 +684,10 @@ public class UserService {
         }
 
         Integer schoolId = parseIntFromMap(userData.get("schoolId"));
+        boolean isAdminRole = "ADMIN".equals(roleName) || roleName.startsWith("ADMIN_");
+        if (isAdminRole && schoolId == null) {
+            throw new BadRequestException("Tài khoản Admin bắt buộc phải gán trường.");
+        }
         if (schoolId != null) {
             School school = schoolRepository.findById(schoolId).orElseThrow(() -> new BadRequestException("Invalid school ID"));
             if ("SUPER_ADMIN".equals(currentUserRole)) {
@@ -654,10 +715,12 @@ public class UserService {
             if (rn.contains("STUDENT")) {
                 Optional<ClassEntity> classOpt = classRepository.findById(classId);
                 if (classOpt.isPresent()) {
+                    ClassStatusPolicy.assertTeachActionAllowed(classOpt.get(), "gán học sinh vào lớp");
                     List<Enrollment> existingEnrollments = enrollmentRepository.findByClassEntityId(classId);
                     boolean alreadyEnrolled = existingEnrollments.stream()
                             .anyMatch(e -> e.getStudent() != null && e.getStudent().getId().equals(savedUser.getId()));
                     if (!alreadyEnrolled) {
+                        ensureClassHasRoomForNewActiveStudent(classOpt.get());
                         Enrollment enrollment = new Enrollment();
                         enrollment.setStudent(savedUser);
                         enrollment.setClassEntity(classOpt.get());
@@ -700,6 +763,7 @@ public class UserService {
                         if (parentStudentRepository.existsByParentIdAndStudentId(savedUser.getId(), studentId)) {
                             continue; // không tạo trùng
                         }
+                        assertStudentParentLimit(studentId, savedUser.getId());
                         ParentStudent ps = new ParentStudent();
                         ps.setParent(savedUser);
                         ps.setStudent(student);
@@ -742,7 +806,15 @@ public class UserService {
             } catch (Exception ignored) {}
         }
         if (userData.get("gender") != null) user.setGender((String) userData.get("gender"));
-        if (userData.get("phone") != null) user.setPhone((String) userData.get("phone"));
+        if (userData.containsKey("phone")) {
+            Object phoneObj = userData.get("phone");
+            String raw = phoneObj == null ? "" : phoneObj.toString();
+            try {
+                user.setPhone(PhoneFormat.parseNationalMobileOrNull(raw));
+            } catch (IllegalArgumentException e) {
+                throw new BadRequestException(e.getMessage());
+            }
+        }
         if (userData.get("department") != null) user.setDepartment((String) userData.get("department"));
         if (userData.get("relationship") != null) user.setRelationship((String) userData.get("relationship"));
         // Giáo viên dùng subjectIds (nhiều môn) qua bảng teacher_subjects, không set user.subject ở đây
@@ -752,6 +824,24 @@ public class UserService {
         if (rn == null || rn.isEmpty()) return false;
         return rn.startsWith("TEACHER") || rn.contains("TEACHER")
                 || rn.contains("GIÁO VIÊN") || rn.contains("GIAO VIEN") || rn.contains("GV");
+    }
+
+    /**
+     * Không cho thêm enrollment ACTIVE nếu lớp đã đủ theo {@link ClassEntity#getCapacity()}.
+     * {@code capacity} null: không áp giới hạn qua trường này.
+     */
+    private void ensureClassHasRoomForNewActiveStudent(ClassEntity classEntity) {
+        if (classEntity == null || classEntity.getId() == null) return;
+        Integer cap = classEntity.getCapacity();
+        if (cap == null || cap <= 0) return;
+        long active = enrollmentRepository.countActiveByClassEntityId(classEntity.getId());
+        if (active >= cap) {
+            String label = classEntity.getName() != null && !classEntity.getName().isBlank()
+                    ? classEntity.getName()
+                    : ("id=" + classEntity.getId());
+            throw new BadRequestException(
+                    "Lớp \"" + label + "\" đã đạt sĩ số tối đa (" + cap + " học sinh). Không thể thêm học sinh.");
+        }
     }
 
     /** Parse list of integers from request (e.g. studentIds). */
@@ -774,11 +864,22 @@ public class UserService {
         Role oldRole = existingUser.getRole();
 
         if (userData.get("email") != null) {
-            String newEmail = (String) userData.get("email");
-            if (isEmailTakenByOtherUser(newEmail, id)) throw new BadRequestException("Email already exists");
+            String newEmail = userData.get("email").toString().trim();
+            if (newEmail.isEmpty()) {
+                throw new BadRequestException("Email là bắt buộc");
+            }
+            if (!EmailFormat.isValid(newEmail)) {
+                throw new BadRequestException("Email không hợp lệ");
+            }
             existingUser.setEmail(newEmail);
         }
-        if (userData.get("fullName") != null) existingUser.setFullName((String) userData.get("fullName"));
+        if (userData.get("fullName") != null) {
+            String newFullName = userData.get("fullName").toString().trim();
+            if (newFullName.isEmpty()) {
+                throw new BadRequestException("Họ tên là bắt buộc");
+            }
+            existingUser.setFullName(newFullName);
+        }
         if (userData.get("status") != null) existingUser.setStatus((String) userData.get("status"));
         if (userData.get("password") != null) existingUser.setPasswordHash((String) userData.get("password"));
         setUserProfileFieldsFromMap(existingUser, userData);
@@ -790,6 +891,17 @@ public class UserService {
         Integer schoolId = parseIntFromMap(userData.get("schoolId"));
         if (schoolId != null) {
             existingUser.setSchool(schoolRepository.findById(schoolId).orElseThrow(() -> new BadRequestException("Invalid school ID")));
+        }
+        if (existingUser.getEmail() != null
+                && isEmailTakenByOtherUser(existingUser.getEmail(), id)) {
+            throw new BadRequestException("Email already exists");
+        }
+        String targetRoleName = existingUser.getRole() != null && existingUser.getRole().getName() != null
+                ? existingUser.getRole().getName().trim().toUpperCase()
+                : "";
+        boolean targetIsAdmin = "ADMIN".equals(targetRoleName) || targetRoleName.startsWith("ADMIN_");
+        if (targetIsAdmin && existingUser.getSchool() == null) {
+            throw new BadRequestException("Tài khoản Admin bắt buộc phải gán trường.");
         }
 
         User updatedUser = saveUser(existingUser);
@@ -821,6 +933,7 @@ public class UserService {
             if (newClassId != null) {
                 Optional<ClassEntity> classOpt = classRepository.findById(newClassId);
                 if (classOpt.isPresent()) {
+                    ClassStatusPolicy.assertTeachActionAllowed(classOpt.get(), "gán học sinh vào lớp");
                     List<Enrollment> existingEnrollments = enrollmentRepository.findByStudentId(updatedUser.getId());
                     Enrollment activeEnrollment = existingEnrollments.stream()
                             .filter(e -> "ACTIVE".equalsIgnoreCase(e.getStatus()))
@@ -840,6 +953,7 @@ public class UserService {
                     boolean alreadyEnrolled = classEnrollments.stream()
                             .anyMatch(e -> e.getStudent() != null && e.getStudent().getId().equals(updatedUser.getId()) && "ACTIVE".equalsIgnoreCase(e.getStatus()));
                     if (!alreadyEnrolled) {
+                        ensureClassHasRoomForNewActiveStudent(classOpt.get());
                         Enrollment newEnrollment = new Enrollment();
                         newEnrollment.setStudent(updatedUser);
                         newEnrollment.setClassEntity(classOpt.get());
@@ -879,6 +993,7 @@ public class UserService {
                     if (studentUser == null || studentUser.getSchool() == null || !studentUser.getSchool().getId().equals(parentSchoolId)) continue;
                     if (studentUser.getRole() == null || !studentUser.getRole().getName().toUpperCase().contains("STUDENT")) continue;
                     if (parentStudentRepository.existsByParentIdAndStudentId(updatedUser.getId(), studentId)) continue;
+                    assertStudentParentLimit(studentId, updatedUser.getId());
                     ParentStudent ps = new ParentStudent();
                     ps.setParent(updatedUser);
                     ps.setStudent(studentUser);
@@ -915,6 +1030,23 @@ public class UserService {
         return list.stream()
                 .map(ps -> ps.getStudent() != null ? ps.getStudent().getId() : null)
                 .filter(Objects::nonNull)
+                .collect(Collectors.toList());
+    }
+
+    /** Danh sách phụ huynh của học sinh (phục vụ dashboard hồ sơ học sinh). */
+    @Transactional(readOnly = true)
+    public List<Map<String, Object>> getParentsForStudent(Integer studentId) {
+        List<ParentStudent> list = parentStudentRepository.findByStudentIdWithRelations(studentId);
+        return list.stream()
+                .map(ps -> {
+                    User p = ps.getParent();
+                    Map<String, Object> row = new HashMap<>();
+                    row.put("id", p != null ? p.getId() : null);
+                    row.put("fullName", p != null ? p.getFullName() : null);
+                    row.put("phone", p != null ? p.getPhone() : null);
+                    row.put("email", p != null ? p.getEmail() : null);
+                    return row;
+                })
                 .collect(Collectors.toList());
     }
 

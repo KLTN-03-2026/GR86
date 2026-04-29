@@ -10,6 +10,7 @@ import com.example.schoolmanagement.dto.schedule.ScheduleGenerateResult;
 import com.example.schoolmanagement.dto.schedule.ScheduleGenerateResult.UnmetAssignment;
 import com.example.schoolmanagement.exception.BadRequestException;
 import com.example.schoolmanagement.exception.ResourceNotFoundException;
+import com.example.schoolmanagement.util.ClassStatusPolicy;
 import com.example.schoolmanagement.repository.ScheduleRepository;
 import com.example.schoolmanagement.repository.ClassRepository;
 import com.example.schoolmanagement.repository.SubjectRepository;
@@ -211,11 +212,15 @@ public class ScheduleService {
     }
 
     public void deleteSchedule(Integer id) {
-        getScheduleById(id);
+        Schedule existing = getScheduleById(id);
+        ClassStatusPolicy.assertTeachActionAllowed(existing.getClassEntity(), "xóa thời khóa biểu");
         scheduleRepository.deleteById(id);
     }
 
     public int deleteAllSchedulesByClass(Integer classId) {
+        ClassEntity classEntity = classRepository.findById(classId)
+                .orElseThrow(() -> new BadRequestException("Class not found"));
+        ClassStatusPolicy.assertTeachActionAllowed(classEntity, "xóa thời khóa biểu");
         List<Schedule> schedules = scheduleRepository.findByClassEntityId(classId);
         int count = schedules.size();
         scheduleRepository.deleteAll(schedules);
@@ -243,6 +248,7 @@ public class ScheduleService {
 
         ClassEntity classEntity = classRepository.findById(classId)
                 .orElseThrow(() -> new ResourceNotFoundException("Class not found"));
+        ClassStatusPolicy.assertTeachActionAllowed(classEntity, "tạo thời khóa biểu");
         School school = classEntity.getSchool();
         if (school == null) {
             throw new ResourceNotFoundException("School not found for class");
@@ -842,6 +848,7 @@ public class ScheduleService {
         if (classId == null) throw new BadRequestException("classId is required");
         ClassEntity classEntity = classRepository.findById(classId)
                 .orElseThrow(() -> new BadRequestException("Class not found"));
+        ClassStatusPolicy.assertTeachActionAllowed(classEntity, "tạo thời khóa biểu");
         schedule.setClassEntity(classEntity);
         schedule.setSchool(classEntity.getSchool());
 
@@ -931,10 +938,12 @@ public class ScheduleService {
             if (classId != null) {
                 ClassEntity classEntity = classRepository.findById(classId)
                         .orElseThrow(() -> new BadRequestException("Class not found"));
+                ClassStatusPolicy.assertTeachActionAllowed(classEntity, "cập nhật thời khóa biểu");
                 schedule.setClassEntity(classEntity);
                 schedule.setSchool(classEntity.getSchool());
             }
         }
+        ClassStatusPolicy.assertTeachActionAllowed(schedule.getClassEntity(), "cập nhật thời khóa biểu");
 
         Object subjectIdObj = scheduleData.get("subjectId");
         Integer subjectId = null;
@@ -1003,6 +1012,23 @@ public class ScheduleService {
         if (effectiveClass != null && effectiveSubjectId != null && effectiveTeacherId != null) {
             ClassSection matched = resolveClassSection(effectiveClass, effectiveSubjectId, effectiveTeacherId, explicitCsId);
             schedule.setClassSection(matched);
+        }
+
+        LocalDate effectiveDate = schedule.getDate();
+        Integer effectivePeriod = schedule.getPeriod();
+        Integer effectiveClassId = schedule.getClassEntity() != null ? schedule.getClassEntity().getId() : null;
+        Integer effectiveTeacherIdForConflict = schedule.getTeacher() != null ? schedule.getTeacher().getId() : null;
+        if (effectiveDate != null && effectivePeriod != null && (effectiveClassId != null || effectiveTeacherIdForConflict != null)) {
+            List<Schedule> conflicts = findConflictsByDate(
+                    effectiveDate,
+                    effectivePeriod,
+                    effectiveTeacherIdForConflict,
+                    effectiveClassId);
+            boolean hasConflict = conflicts.stream()
+                    .anyMatch(conflict -> conflict.getId() == null || !conflict.getId().equals(schedule.getId()));
+            if (hasConflict) {
+                throw new BadRequestException("Schedule conflict detected");
+            }
         }
 
         Schedule saved = scheduleRepository.save(schedule);

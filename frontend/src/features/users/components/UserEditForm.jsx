@@ -1,7 +1,29 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Lock, Mail, School, Shield, ToggleLeft, User } from 'lucide-react';
+import { toast } from 'react-toastify';
 import { useAuth } from '../../auth/context/AuthContext';
 import api from '../../../shared/lib/api';
+import { isValidEmail } from '../../../shared/lib/emailFormat';
+import { isValidOptionalVietnamMobile } from '../../../shared/lib/phoneFormat';
+import { isTeachingActiveClass } from '../../../shared/lib/classStatus';
+
+function isClassAtMaxCapacity(cls) {
+  if (!cls) return false;
+  const cap = cls.capacity;
+  if (cap == null || Number(cap) <= 0) return false;
+  const count = cls.studentCount ?? 0;
+  return Number(count) >= Number(cap);
+}
+
+function getApiErrorMessage(err, fallback = 'Đã xảy ra lỗi') {
+  const d = err?.response?.data;
+  if (d == null) return err?.message || fallback;
+  if (typeof d === 'string') return d;
+  const msg = d.message;
+  if (msg != null) return Array.isArray(msg) ? msg.join(', ') : String(msg);
+  if (d.error != null) return typeof d.error === 'string' ? d.error : String(d.error);
+  return fallback;
+}
 
 const UserEditForm = ({
   userId,
@@ -31,6 +53,9 @@ const UserEditForm = ({
   const [loadingRoles, setLoadingRoles] = useState(false);
   const [showRoleChangeConfirm, setShowRoleChangeConfirm] = useState(false);
   const [pendingRoleId, setPendingRoleId] = useState(null);
+  const [loadedRoleSnapshot, setLoadedRoleSnapshot] = useState(null);
+  /** Lớp ban đầu khi tải user (học sinh) — dùng để bỏ qua kiểm tra “đủ sĩ số” khi giữ nguyên lớp. */
+  const [initialStudentClassId, setInitialStudentClassId] = useState('');
 
   const [formData, setFormData] = useState({
     email: '',
@@ -62,8 +87,18 @@ const UserEditForm = ({
     const u = (name || '').toUpperCase();
     return u.includes('PARENT') || u.includes('PHỤ HUYNH') || u.includes('PHU HUYNH');
   };
+  const isRoleAdmin = (name) => {
+    const u = (name || '').toUpperCase();
+    return u === 'ADMIN' || u.startsWith('ADMIN_');
+  };
   const isAllowedRoleForSchoolAdmin = (roleName) => {
     return isRoleStudent(roleName) || isRoleTeacher(roleName) || isRoleParent(roleName);
+  };
+  const withCurrentRoleOption = (list, currentRole) => {
+    const normalized = Array.isArray(list) ? list.filter((r) => r && r.id != null) : [];
+    if (!currentRole || currentRole.id == null) return normalized;
+    const exists = normalized.some((r) => String(r.id) === String(currentRole.id));
+    return exists ? normalized : [...normalized, currentRole];
   };
 
   const fetchRolesForSchool = async (schoolId) => {
@@ -72,7 +107,7 @@ const UserEditForm = ({
       const res = await api.get(`/roles/school/${schoolId}`);
       let allRoles = res.data.roles || [];
       if (isSchoolAdmin) allRoles = (allRoles || []).filter((r) => isAllowedRoleForSchoolAdmin(r?.name));
-      setRoles(allRoles);
+      setRoles(withCurrentRoleOption(allRoles, loadedRoleSnapshot));
     } catch (err) {
       console.error(err);
     } finally {
@@ -84,7 +119,7 @@ const UserEditForm = ({
     try {
       const res = await api.get('/classes');
       const all = res.data.classes || [];
-      setClasses(all.filter((cls) => (cls.school?.id || cls.school_id) === parseInt(schoolId, 10)));
+      setClasses(all.filter((cls) => (cls.school?.id || cls.school_id) === parseInt(schoolId, 10)).filter(isTeachingActiveClass));
     } catch (_) {
       setClasses([]);
     }
@@ -131,12 +166,20 @@ const UserEditForm = ({
       }
 
       const schoolId = user.school?.id;
+      setLoadedRoleSnapshot(user.role || null);
       if (schoolId) {
         try {
           const rolesRes = await api.get(`/roles/school/${schoolId}`);
           let allRoles = rolesRes.data.roles || [];
           if (isSchoolAdmin) allRoles = (allRoles || []).filter((r) => isAllowedRoleForSchoolAdmin(r?.name));
-          setRoles(allRoles);
+          setRoles(withCurrentRoleOption(allRoles, user.role));
+        } catch (error) {
+          console.error(error);
+        }
+      } else if (currentUserRole === 'SUPER_ADMIN') {
+        try {
+          const rolesRes = await api.get('/roles?userRole=SUPER_ADMIN');
+          setRoles(rolesRes.data.roles || []);
         } catch (error) {
           console.error(error);
         }
@@ -194,6 +237,7 @@ const UserEditForm = ({
         relationship: user.relationship || '',
         status: user.status || 'ACTIVE'
       });
+      setInitialStudentClassId(classId);
     } catch (err) {
       setError('Không tải được thông tin người dùng');
       console.error(err);
@@ -217,12 +261,18 @@ const UserEditForm = ({
   }, [formData.schoolId]);
 
   const selectedRole = useMemo(() => {
-    return roles.find((r) => r.id === parseInt(formData.roleId, 10) || r.id === formData.roleId);
-  }, [roles, formData.roleId]);
+    const fromList = roles.find((r) => r.id === parseInt(formData.roleId, 10) || r.id === formData.roleId);
+    if (fromList) return fromList;
+    if (loadedRoleSnapshot && String(loadedRoleSnapshot.id) === String(formData.roleId)) return loadedRoleSnapshot;
+    return null;
+  }, [roles, formData.roleId, loadedRoleSnapshot]);
 
   const isStudent = isRoleStudent(selectedRole?.name);
   const isParent = isRoleParent(selectedRole?.name);
   const isTeacher = isRoleTeacher(selectedRole?.name);
+  const isSuperAdminEditingAdmin =
+    currentUserRole === 'SUPER_ADMIN' &&
+    (isRoleAdmin(loadedRoleSnapshot?.name) || isRoleAdmin(selectedRole?.name));
 
   const handleChange = (e) => {
     const { name, value } = e.target;
@@ -263,14 +313,40 @@ const UserEditForm = ({
   };
 
   const validateForm = () => {
-    if (!formData.email) return setError('Email là bắt buộc') || false;
-    if (!formData.fullName) return setError('Họ tên là bắt buộc') || false;
+    const emailTrim = formData.email?.trim() || '';
+    if (!emailTrim) {
+      setError('Email là bắt buộc');
+      return false;
+    }
+    if (!isValidEmail(emailTrim)) {
+      setError('Email không hợp lệ');
+      return false;
+    }
+    if (!isValidOptionalVietnamMobile(formData.phone ?? '')) {
+      setError('Số điện thoại không hợp lệ');
+      return false;
+    }
+    if (!formData.fullName?.trim()) {
+      setError('Họ tên là bắt buộc');
+      return false;
+    }
     if (formData.password && formData.password !== formData.confirmPassword) {
       setError('Mật khẩu xác nhận không khớp');
       return false;
     }
-    if (!formData.roleId) return setError('Vai trò là bắt buộc') || false;
-    if (!formData.schoolId) return setError('Trường là bắt buộc') || false;
+    if (!formData.roleId) {
+      setError('Vai trò là bắt buộc');
+      return false;
+    }
+    if (!formData.schoolId) {
+      setError('Trường là bắt buộc');
+      return false;
+    }
+    const isAdminRole = isRoleAdmin(selectedRole?.name);
+    if (isAdminRole && !formData.schoolId) {
+      setError('Tài khoản Admin bắt buộc phải gán trường');
+      return false;
+    }
     if (isSchoolAdmin && !isAllowedRoleForSchoolAdmin(selectedRole?.name)) {
       setError('Admin chỉ được gán vai trò: Phụ huynh / Học sinh / Giáo viên');
       return false;
@@ -278,6 +354,20 @@ const UserEditForm = ({
     if (isRoleStudent(selectedRole?.name) && !formData.classId) {
       setError('Học sinh bắt buộc phải chọn lớp');
       return false;
+    }
+    if (isRoleStudent(selectedRole?.name) && formData.classId) {
+      const sameClassAsLoaded =
+        String(formData.classId) === String(initialStudentClassId) && initialStudentClassId !== '';
+      if (!sameClassAsLoaded) {
+        const cid = parseInt(formData.classId, 10);
+        const cls = classes.find((c) => c.id === cid || String(c.id) === String(formData.classId));
+        if (cls && isClassAtMaxCapacity(cls)) {
+          setError(
+            `Lớp "${cls.name}" đã đủ sĩ số (${cls.studentCount ?? 0}/${cls.capacity}). Chọn lớp khác hoặc tăng sĩ số tối đa.`
+          );
+          return false;
+        }
+      }
     }
     return true;
   };
@@ -300,12 +390,12 @@ const UserEditForm = ({
         fullName: formData.fullName.trim(),
         roleId: roleIdNum,
         schoolId: schoolIdNum,
-        status: formData.status || 'ACTIVE'
+        status: formData.status || 'ACTIVE',
+        phone: String(formData.phone ?? '').trim()
       };
       if (formData.password && formData.password.trim()) userData.password = formData.password;
       if (formData.dateOfBirth && formData.dateOfBirth.trim()) userData.dateOfBirth = formData.dateOfBirth;
       if (formData.gender && formData.gender.trim()) userData.gender = formData.gender.trim();
-      if (formData.phone != null && String(formData.phone).trim()) userData.phone = String(formData.phone).trim();
       if (formData.department != null && String(formData.department).trim()) userData.department = String(formData.department).trim();
       if (formData.relationship != null && String(formData.relationship).trim()) userData.relationship = String(formData.relationship).trim();
 
@@ -332,7 +422,9 @@ const UserEditForm = ({
       setSuccess('Cập nhật người dùng thành công!');
       onUpdated?.();
     } catch (err) {
-      setError(err.response?.data?.error || 'Cập nhật thất bại');
+      const msg = getApiErrorMessage(err, 'Cập nhật thất bại');
+      setError(msg);
+      toast.error(msg);
       console.error(err);
     } finally {
       setLoading(false);
@@ -472,24 +564,67 @@ const UserEditForm = ({
             <div className="grid grid-cols-1 gap-5 md:grid-cols-2">
               <div>
                 <label className="block text-sm font-semibold text-slate-700">Trường</label>
-                <div className="relative mt-1">
-                  <span className="pointer-events-none absolute inset-y-0 left-3 flex items-center text-slate-400">
-                    <School size={18} />
-                  </span>
-                  <input
-                    type="text"
-                    value={schoolName}
-                    disabled
-                    readOnly
-                    className="block w-full rounded-2xl border border-slate-200 bg-slate-50 pl-10 pr-3 py-3 text-base shadow-sm"
-                  />
-                </div>
-                <input type="hidden" name="schoolId" value={formData.schoolId} />
+                {currentUserRole === 'SUPER_ADMIN' ? (
+                  <div className="relative mt-1">
+                    <span className="pointer-events-none absolute inset-y-0 left-3 flex items-center text-slate-400">
+                      <School size={18} />
+                    </span>
+                    <select
+                      name="schoolId"
+                      value={formData.schoolId}
+                      onChange={handleChange}
+                      className="block w-full appearance-none rounded-2xl border border-slate-200 bg-white pl-10 pr-10 py-3 text-base shadow-sm outline-none focus:border-indigo-500 focus:ring-4 focus:ring-indigo-100"
+                      required
+                    >
+                      <option value="">Chọn trường</option>
+                      {schools.map((school) => (
+                        <option key={school.id} value={school.id}>
+                          {school.name} ({school.code})
+                        </option>
+                      ))}
+                    </select>
+                    <span className="pointer-events-none absolute inset-y-0 right-3 flex items-center text-slate-400">
+                      ▾
+                    </span>
+                  </div>
+                ) : (
+                  <>
+                    <div className="relative mt-1">
+                      <span className="pointer-events-none absolute inset-y-0 left-3 flex items-center text-slate-400">
+                        <School size={18} />
+                      </span>
+                      <input
+                        type="text"
+                        value={schoolName}
+                        disabled
+                        readOnly
+                        className="block w-full rounded-2xl border border-slate-200 bg-slate-50 pl-10 pr-3 py-3 text-base shadow-sm"
+                      />
+                    </div>
+                    <input type="hidden" name="schoolId" value={formData.schoolId} />
+                  </>
+                )}
               </div>
 
               <div>
                 <label className="block text-sm font-semibold text-slate-700">Vai trò *</label>
-                {isAdmin ? (
+                {isSuperAdminEditingAdmin ? (
+                  <>
+                    <div className="relative mt-1">
+                      <span className="pointer-events-none absolute inset-y-0 left-3 flex items-center text-slate-400">
+                        <Shield size={18} />
+                      </span>
+                      <input
+                        type="text"
+                        value="Quản trị trường (ADMIN)"
+                        disabled
+                        readOnly
+                        className="block w-full rounded-2xl border border-slate-200 bg-slate-50 pl-10 pr-3 py-3 text-base shadow-sm"
+                      />
+                    </div>
+                    <input type="hidden" name="roleId" value={formData.roleId} />
+                  </>
+                ) : isAdmin ? (
                   <div className="relative mt-1">
                     <span className="pointer-events-none absolute inset-y-0 left-3 flex items-center text-slate-400">
                       <Shield size={18} />
@@ -540,11 +675,18 @@ const UserEditForm = ({
                   required
                 >
                   <option value="">Chọn lớp</option>
-                  {classes.map((cls) => (
-                    <option key={cls.id} value={cls.id}>
-                      {cls.name}
-                    </option>
-                  ))}
+                  {classes.map((cls) => {
+                    const full = isClassAtMaxCapacity(cls);
+                    const cnt = cls.studentCount ?? 0;
+                    const capLabel = cls.capacity != null && cls.capacity !== '' ? cls.capacity : '—';
+                    const isCurrent = String(cls.id) === String(initialStudentClassId);
+                    const disableOption = full && !isCurrent;
+                    return (
+                      <option key={cls.id} value={cls.id} disabled={disableOption}>
+                        {cls.name} ({cnt}/{capLabel}){full ? (isCurrent ? ' — lớp hiện tại' : ' — đã đủ sĩ số') : ''}
+                      </option>
+                    );
+                  })}
                 </select>
               </div>
             )}
